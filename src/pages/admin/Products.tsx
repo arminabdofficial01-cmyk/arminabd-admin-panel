@@ -184,26 +184,195 @@ function TagInput({
   );
 }
 
-// ─── SKU helpers ──────────────────────────────────────────────────────────────
+// ─── SKU & product identity helpers ───────────────────────────────────────────
 
-function generateSku(productName: string, size: string, color: string): string {
-  const namePart = productName.trim().replace(/\s+/g, "-").toUpperCase().slice(0, 10);
-  const parts = [namePart, size?.toUpperCase(), color?.toUpperCase()].filter(Boolean);
+const AUTO_SKU_PLACEHOLDER = "Auto on save";
+
+interface ExistingProductMatch {
+  id: string;
+  display_id: string | null;
+  name: string;
+}
+
+function normalizeProductName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+function variantKey(size: string, color: string): string {
+  return `${(size || "").trim().toLowerCase()}::${(color || "").trim().toLowerCase()}`;
+}
+
+function generateVariantSku(displayId: string, size: string, color: string): string {
+  const parts = [displayId.trim().toUpperCase()];
+  const sizePart = size?.trim().toUpperCase();
+  const colorPart = color?.trim().toUpperCase();
+
+  if (sizePart) parts.push(sizePart);
+  if (colorPart) parts.push(colorPart);
+  if (!sizePart && !colorPart) parts.push("DEFAULT");
+
   return parts.join("-");
+}
+
+function findDuplicateVariantKeys(combos: VariantCombination[]): string | null {
+  const seen = new Set<string>();
+  for (const combo of combos) {
+    const key = variantKey(combo.size, combo.color);
+    if (seen.has(key)) return key;
+    seen.add(key);
+  }
+  return null;
+}
+
+function findDuplicateSkus(skus: string[]): string | null {
+  const seen = new Set<string>();
+  for (const sku of skus) {
+    const normalized = sku.trim().toUpperCase();
+    if (!normalized || normalized === AUTO_SKU_PLACEHOLDER.toUpperCase()) continue;
+    if (seen.has(normalized)) return normalized;
+    seen.add(normalized);
+  }
+  return null;
+}
+
+function resolveVariantSkus(
+  combos: VariantCombination[],
+  displayId: string
+): VariantCombination[] {
+  return combos.map((combo) => ({
+    ...combo,
+    sku:
+      combo.skuManuallyEdited && combo.sku !== AUTO_SKU_PLACEHOLDER
+        ? combo.sku.trim().toUpperCase()
+        : generateVariantSku(displayId, combo.size, combo.color),
+  }));
+}
+
+async function findExistingProduct(
+  name: string,
+  categoryId: string | null
+): Promise<ExistingProductMatch | null> {
+  const normalizedName = normalizeProductName(name);
+  if (!normalizedName) return null;
+
+  let query = supabase
+    .from("products")
+    .select("id, display_id, name, category_id")
+    .is("deleted_at", null);
+
+  if (categoryId) {
+    query = query.eq("category_id", categoryId);
+  } else {
+    query = query.is("category_id", null);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Product lookup failed: ${error.message}`);
+
+  const match = (data || []).find(
+    (product) => normalizeProductName(product.name) === normalizedName
+  );
+
+  if (!match) return null;
+
+  return {
+    id: match.id,
+    display_id: match.display_id,
+    name: match.name,
+  };
+}
+
+async function findExistingVariantId(
+  productId: string,
+  size: string,
+  color: string
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("product_variants")
+    .select("id, size, color")
+    .eq("product_id", productId)
+    .is("deleted_at", null);
+
+  if (error) throw new Error(`Variant lookup failed: ${error.message}`);
+
+  const targetKey = variantKey(size, color);
+  const match = (data || []).find(
+    (variant) => variantKey(variant.size || "", variant.color || "") === targetKey
+  );
+
+  return match?.id ?? null;
+}
+
+async function findConflictingSkusInDb(
+  skus: string[],
+  excludeVariantIds: string[] = []
+): Promise<string[]> {
+  const normalizedSkus = [
+    ...new Set(
+      skus
+        .map((sku) => sku.trim().toUpperCase())
+        .filter((sku) => sku && sku !== AUTO_SKU_PLACEHOLDER.toUpperCase())
+    ),
+  ];
+  if (normalizedSkus.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("product_variants")
+    .select("id, sku")
+    .in("sku", normalizedSkus)
+    .is("deleted_at", null);
+
+  if (error) throw new Error(`SKU check failed: ${error.message}`);
+
+  const exclude = new Set(excludeVariantIds);
+  return (data || [])
+    .filter((row) => !exclude.has(row.id))
+    .map((row) => row.sku);
+}
+
+function formatSaveError(err: unknown): string {
+  const message = err instanceof Error ? err.message : "An unknown error occurred";
+
+  if (
+    message.includes("product_variants_sku_active_unique") ||
+    message.includes("product_variants_product_size_color_active_unique") ||
+    message.includes("duplicate key value violates unique constraint")
+  ) {
+    const skuMatch = message.match(/Key \(sku\)=\(([^)]+)\)/i);
+    if (skuMatch?.[1]) {
+      return `SKU "${skuMatch[1]}" is already used by another product. Please change it.`;
+    }
+    if (message.includes("product_variants_product_size_color_active_unique")) {
+      return "A variant with this size and color already exists for this product.";
+    }
+    return "This SKU is already used by another product. Please use a unique SKU for each variant.";
+  }
+
+  return message;
+}
+
+async function rollbackCreatedProduct(productId: string) {
+  await supabase.from("product_variants").delete().eq("product_id", productId);
+  await supabase.from("product_images").delete().eq("product_id", productId);
+  await supabase.from("products").delete().eq("id", productId);
 }
 
 function buildCombinations(
   group: VariantGroup,
-  productName: string,
+  displayId: string | null,
   existingCombos: VariantCombination[]
 ): VariantCombination[] {
   const sizes = group.sizes.length > 0 ? group.sizes : [""];
   const colors = group.colors.length > 0 ? group.colors : [""];
   const combos: VariantCombination[] = [];
+
   sizes.forEach((size) => {
     colors.forEach((color) => {
       const existing = existingCombos.find((c) => c.size === size && c.color === color);
-      const autoSku = generateSku(productName, size, color);
+      const autoSku = displayId
+        ? generateVariantSku(displayId, size, color)
+        : AUTO_SKU_PLACEHOLDER;
+
       combos.push({
         id: existing?.id,
         size,
@@ -214,6 +383,7 @@ function buildCombinations(
       });
     });
   });
+
   return combos;
 }
 
@@ -259,7 +429,48 @@ export default function Products() {
   const [removedImageIds, setRemovedImageIds] = useState<string[]>([]);
 
   const [searchDebounce, setSearchDebounce] = useState("");
+  const [productDisplayId, setProductDisplayId] = useState<string | null>(null);
+  const [mergePreview, setMergePreview] = useState<ExistingProductMatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function getEffectiveDisplayId(): string | null {
+    return productDisplayId || mergePreview?.display_id || null;
+  }
+
+  function rebuildVariantSkus(displayId: string | null) {
+    setForm((f) => ({
+      ...f,
+      variantGroups: f.variantGroups.map((group) => ({
+        ...group,
+        combinations: buildCombinations(group, displayId, group.combinations),
+      })),
+    }));
+  }
+
+  async function checkForExistingProduct(name: string, categoryId: string) {
+    if (editingId || !name.trim()) {
+      setMergePreview(null);
+      if (!editingId) setProductDisplayId(null);
+      return;
+    }
+
+    try {
+      const existing = await findExistingProduct(name, categoryId || null);
+      if (existing) {
+        setMergePreview(existing);
+        if (existing.display_id) {
+          setProductDisplayId(existing.display_id);
+          rebuildVariantSkus(existing.display_id);
+        }
+      } else {
+        setMergePreview(null);
+        setProductDisplayId(null);
+        rebuildVariantSkus(null);
+      }
+    } catch (err: unknown) {
+      toast.error(formatSaveError(err));
+    }
+  }
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounce(search), 300);
@@ -375,6 +586,8 @@ export default function Products() {
   function openAdd() {
     setEditingId(null);
     setForm(emptyForm);
+    setProductDisplayId(null);
+    setMergePreview(null);
     resetImageState();
     setModalOpen(true);
   }
@@ -405,6 +618,8 @@ export default function Products() {
 
     if (product) {
       setEditingId(id);
+      setProductDisplayId(product.display_id || null);
+      setMergePreview(null);
       resetImageState();
       setExistingImages((images as ProductImage[]) || []);
       const combinations: VariantCombination[] = ((variants as ProductVariant[]) || []).map((v) => ({
@@ -487,23 +702,22 @@ export default function Products() {
     field: "sizes" | "colors",
     values: string[]
   ) {
+    const displayId = getEffectiveDisplayId();
     setForm((f) => {
       const groups = [...f.variantGroups];
       const group = { ...groups[groupIdx], [field]: values };
-      group.combinations = buildCombinations(group, f.name, group.combinations);
+      group.combinations = buildCombinations(group, displayId, group.combinations);
       groups[groupIdx] = group;
       return { ...f, variantGroups: groups };
     });
   }
 
   function handleNameChange(name: string) {
+    const displayId = getEffectiveDisplayId();
     setForm((f) => {
       const variantGroups = f.variantGroups.map((group) => ({
         ...group,
-        combinations: group.combinations.map((c) => ({
-          ...c,
-          sku: c.skuManuallyEdited ? c.sku : generateSku(name, c.size, c.color),
-        })),
+        combinations: buildCombinations(group, displayId, group.combinations),
       }));
       return { ...f, name, variantGroups };
     });
@@ -557,20 +771,27 @@ export default function Products() {
       return;
     }
 
+    const allCombos = form.variantGroups.flatMap((group) => group.combinations);
+    const duplicateVariantKey = findDuplicateVariantKeys(allCombos);
+    if (duplicateVariantKey) {
+      toast.error("Duplicate size/color combination in form. Each variant must be unique.");
+      return;
+    }
+
     setSaving(true);
+    const isCreateFlow = !editingId;
+    let createdProductId: string | null = null;
+    let mergedIntoExisting = false;
+
     try {
       let productId = editingId;
-
-      // Slug is required by the DB schema — auto-generate silently.
       const baseSlug = form.name
         .toLowerCase()
         .replace(/\s+/g, "-")
         .replace(/[^a-z0-9-]/g, "");
-      const slug = editingId ? baseSlug : `${baseSlug}-${Date.now()}`;
 
-      const productData = {
+      const productFields = {
         name: form.name,
-        slug,
         short_description: form.short_description || null,
         description: form.description || null,
         category_id: form.category_id || null,
@@ -583,25 +804,80 @@ export default function Products() {
       if (editingId) {
         const { error } = await supabase
           .from("products")
-          .update(productData)
+          .update({ ...productFields, slug: baseSlug })
           .eq("id", editingId);
         if (error) throw new Error(`Product update error: ${error.message}`);
       } else {
-        const { data, error } = await supabase
-          .from("products")
-          .insert(productData)
-          .select("id")
-          .single();
-        if (error) throw new Error(`Product insert error: ${error.message}`);
-        productId = data?.id;
+        const existing = await findExistingProduct(form.name, form.category_id || null);
+        if (existing) {
+          productId = existing.id;
+          mergedIntoExisting = true;
+          const { error } = await supabase
+            .from("products")
+            .update(productFields)
+            .eq("id", existing.id);
+          if (error) throw new Error(`Product update error: ${error.message}`);
+        } else {
+          const { data, error } = await supabase
+            .from("products")
+            .insert({ ...productFields, slug: `${baseSlug}-${Date.now()}` })
+            .select("id")
+            .single();
+          if (error) throw new Error(`Product insert error: ${error.message}`);
+          productId = data?.id ?? null;
+          createdProductId = productId;
+        }
       }
 
       if (!productId) throw new Error("Failed to get product ID");
 
-      const allCombos = form.variantGroups.flatMap((group) => group.combinations);
+      const { data: productRow, error: productRowError } = await supabase
+        .from("products")
+        .select("display_id")
+        .eq("id", productId)
+        .single();
+
+      if (productRowError || !productRow?.display_id) {
+        throw new Error("Failed to load product display ID");
+      }
+
+      const displayId = productRow.display_id;
+      const resolvedCombos = resolveVariantSkus(allCombos, displayId);
+
+      const manualSkus = resolvedCombos
+        .filter((combo) => combo.skuManuallyEdited)
+        .map((combo) => combo.sku);
+      const duplicateManualSku = findDuplicateSkus(manualSkus);
+      if (duplicateManualSku) {
+        throw new Error(
+          `Duplicate SKU in form: ${duplicateManualSku}. Each variant needs a unique SKU.`
+        );
+      }
+
+      const { data: ownVariants, error: ownVariantsError } = await supabase
+        .from("product_variants")
+        .select("id")
+        .eq("product_id", productId)
+        .is("deleted_at", null);
+
+      if (ownVariantsError) {
+        throw new Error(`Variant lookup failed: ${ownVariantsError.message}`);
+      }
+
+      const excludeVariantIds = (ownVariants || []).map((variant) => variant.id);
+      const conflictingSkus = await findConflictingSkusInDb(
+        resolvedCombos.map((combo) => combo.sku),
+        excludeVariantIds
+      );
+      if (conflictingSkus.length > 0) {
+        throw new Error(
+          `SKU "${conflictingSkus[0]}" is already used by another product. Please change it.`
+        );
+      }
+
       const keptVariantIds: string[] = [];
 
-      for (const combo of allCombos) {
+      for (const combo of resolvedCombos) {
         const variantPayload = {
           product_id: productId,
           size: combo.size || null,
@@ -610,13 +886,18 @@ export default function Products() {
           stock: parseInt(combo.stock, 10) || 0,
         };
 
-        if (combo.id) {
+        let variantId = combo.id ?? null;
+        if (!variantId) {
+          variantId = await findExistingVariantId(productId, combo.size, combo.color);
+        }
+
+        if (variantId) {
           const { error } = await supabase
             .from("product_variants")
             .update(variantPayload)
-            .eq("id", combo.id);
+            .eq("id", variantId);
           if (error) throw new Error(`Variant update error: ${error.message}`);
-          keptVariantIds.push(combo.id);
+          keptVariantIds.push(variantId);
         } else {
           const { data, error } = await supabase
             .from("product_variants")
@@ -726,12 +1007,21 @@ export default function Products() {
         }
       }
 
-      toast.success(editingId ? "Product updated" : "Product created");
+      if (mergedIntoExisting) {
+        toast.success(`Updated existing product ${form.name} (${displayId})`);
+      } else {
+        toast.success(editingId ? "Product updated" : "Product created");
+      }
       setModalOpen(false);
+      setProductDisplayId(null);
+      setMergePreview(null);
       resetImageState();
       loadProducts();
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "An unknown error occurred");
+      if (isCreateFlow && createdProductId) {
+        await rollbackCreatedProduct(createdProductId);
+      }
+      toast.error(formatSaveError(err));
     }
     setSaving(false);
   }
@@ -921,9 +1211,17 @@ export default function Products() {
               <Input
                 value={form.name}
                 onChange={(e) => handleNameChange(e.target.value)}
+                onBlur={() => void checkForExistingProduct(form.name, form.category_id)}
                 placeholder="e.g. Panjabi"
               />
             </div>
+
+            {mergePreview && !editingId && (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                {mergePreview.name} already exists ({mergePreview.display_id ?? "existing product"})
+                — saving will add or update variants on that product.
+              </p>
+            )}
 
             {/* Short Description */}
             <div className="space-y-2">
@@ -970,9 +1268,10 @@ export default function Products() {
                 <Label>Category</Label>
                 <Select
                   value={form.category_id}
-                  onValueChange={(v) =>
-                    setForm((f) => ({ ...f, category_id: v }))
-                  }
+                  onValueChange={(v) => {
+                    setForm((f) => ({ ...f, category_id: v }));
+                    void checkForExistingProduct(form.name, v);
+                  }}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select category" />
@@ -1196,6 +1495,10 @@ export default function Products() {
                           </span>
                           <Input
                             value={combo.sku}
+                            readOnly={
+                              !combo.skuManuallyEdited &&
+                              combo.sku === AUTO_SKU_PLACEHOLDER
+                            }
                             onChange={(e) =>
                               updateCombination(gi, ci, "sku", e.target.value.toUpperCase())
                             }
