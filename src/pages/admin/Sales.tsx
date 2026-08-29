@@ -566,6 +566,7 @@ export default function Sales() {
     {
       key: "area",
       label: "Area",
+      hideOnMobile: true,
       render: (r) => {
         const shipping = parseShipping(r.shipping_address);
         return shipping?.area ? (
@@ -578,6 +579,7 @@ export default function Sales() {
     {
       key: "payment_method",
       label: "Method",
+      hideOnMobile: true,
       render: (r) => (
         <span className="text-xs uppercase font-semibold">
           {r.payments?.[0]?.payment_method || "N/A"}
@@ -605,6 +607,7 @@ export default function Sales() {
     {
       key: "date",
       label: "Date",
+      hideOnMobile: true,
       render: (r) => (
         <span className="text-xs text-muted-foreground">
           {format(new Date(r.created_at), "MMM dd, yyyy")}
@@ -639,7 +642,7 @@ export default function Sales() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Sales</h1>
+      <h1 className="text-xl sm:text-2xl font-bold">Sales</h1>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard title="Total Sales" value={`৳${stats.totalSales.toFixed(2)}`} icon={TakaIcon} variant="success" />
@@ -648,10 +651,11 @@ export default function Sales() {
         <StatCard title="Cancelled" value={stats.cancelled} icon={XCircle} variant="destructive" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="rounded-lg border bg-card p-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <div className="rounded-lg border bg-card p-4 sm:p-6">
           <h3 className="font-semibold mb-4">Payment Status Breakdown</h3>
-          <ResponsiveContainer width="100%" height={250}>
+          <div className="h-[220px] sm:h-[250px]">
+          <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
                 data={paymentBreakdown}
@@ -659,7 +663,7 @@ export default function Sales() {
                 nameKey="name"
                 cx="50%"
                 cy="50%"
-                outerRadius={90}
+                outerRadius={75}
                 label={({ name, value }: { name: string; value: number }) => `${name}: ${value}`}
               >
                 {paymentBreakdown.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
@@ -667,10 +671,12 @@ export default function Sales() {
               <Tooltip />
             </PieChart>
           </ResponsiveContainer>
+          </div>
         </div>
-        <div className="rounded-lg border bg-card p-6">
+        <div className="rounded-lg border bg-card p-4 sm:p-6">
           <h3 className="font-semibold mb-4">Monthly Revenue</h3>
-          <ResponsiveContainer width="100%" height={250}>
+          <div className="h-[220px] sm:h-[250px]">
+          <ResponsiveContainer width="100%" height="100%">
             <BarChart data={monthlyRevenue}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
               <XAxis dataKey="month" className="text-xs" />
@@ -679,18 +685,19 @@ export default function Sales() {
               <Bar dataKey="amount" fill="hsl(160, 60%, 40%)" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
+          </div>
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
         <Input
           placeholder="Search name, phone or order ID..."
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-          className="w-56"
+          className="w-full sm:col-span-2 lg:col-span-1"
         />
         <Select value={filterOrderStatus} onValueChange={(v) => { setFilterOrderStatus(v === "all" ? "" : v); setPage(1); }}>
-          <SelectTrigger className="w-40"><SelectValue placeholder="Order Status" /></SelectTrigger>
+          <SelectTrigger className="w-full"><SelectValue placeholder="Order Status" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
             {ORDER_STATUSES.map((s) => (
@@ -699,7 +706,7 @@ export default function Sales() {
           </SelectContent>
         </Select>
         <Select value={filterPaymentStatus} onValueChange={(v) => { setFilterPaymentStatus(v === "all" ? "" : v); setPage(1); }}>
-          <SelectTrigger className="w-40"><SelectValue placeholder="Payment Status" /></SelectTrigger>
+          <SelectTrigger className="w-full"><SelectValue placeholder="Payment Status" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All</SelectItem>
             <SelectItem value="paid">Paid</SelectItem>
@@ -708,7 +715,7 @@ export default function Sales() {
           </SelectContent>
         </Select>
         <Select value={filterPaymentMethod} onValueChange={(v) => { setFilterPaymentMethod(v === "all" ? "" : v); setPage(1); }}>
-          <SelectTrigger className="w-40"><SelectValue placeholder="Method" /></SelectTrigger>
+          <SelectTrigger className="w-full"><SelectValue placeholder="Method" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All</SelectItem>
             <SelectItem value="cod">COD</SelectItem>
@@ -716,8 +723,8 @@ export default function Sales() {
             <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
           </SelectContent>
         </Select>
-        <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className="w-40" />
-        <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} className="w-40" />
+        <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className="w-full" />
+        <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} className="w-full" />
       </div>
 
       <DataTable

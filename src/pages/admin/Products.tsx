@@ -1186,6 +1186,7 @@ export default function Products() {
     {
       key: "display_id",
       label: "Product ID",
+      hideOnMobile: true,
       render: (r) => (
         <span className="font-mono text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground whitespace-nowrap">
           {r.display_id ?? "—"}
@@ -1200,6 +1201,7 @@ export default function Products() {
     {
       key: "category",
       label: "Category",
+      hideOnMobile: true,
       render: (r) => r.categories?.name || "—",
     },
     {
@@ -1233,6 +1235,7 @@ export default function Products() {
     {
       key: "variants",
       label: "Variants",
+      hideOnMobile: true,
       render: (r) => (r.product_variants || []).length,
     },
     {
@@ -1267,9 +1270,9 @@ export default function Products() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Product Management</h1>
-        <Button onClick={openAdd}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-xl sm:text-2xl font-bold">Product Management</h1>
+        <Button onClick={openAdd} className="w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" />
           Add Product
         </Button>
@@ -1289,7 +1292,7 @@ export default function Products() {
           setSearch(e.target.value);
           setPage(1);
         }}
-        className="max-w-sm"
+        className="w-full sm:max-w-sm"
       />
 
       <DataTable
@@ -1304,7 +1307,7 @@ export default function Products() {
 
       {/* ── Add / Edit Modal ───────────────────────────────────────────────── */}
       <Dialog open={modalOpen} onOpenChange={setModalOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingId ? "Edit Product" : "Add Product"}</DialogTitle>
           </DialogHeader>
@@ -1370,7 +1373,7 @@ export default function Products() {
             </div>
 
             {/* Category & Prices */}
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label>Category</Label>
                 <Select
@@ -1448,7 +1451,7 @@ export default function Products() {
               )}
 
             {/* Toggles */}
-            <div className="flex gap-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
               <div className="flex items-center gap-2">
                 <Switch
                   checked={form.is_active}
@@ -1556,7 +1559,7 @@ export default function Products() {
                     </Button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <Label className="text-xs mb-1 block">
                         Sizes{" "}
@@ -1582,8 +1585,8 @@ export default function Products() {
                   </div>
 
                   {group.combinations.length > 0 && (
-                    <div className="space-y-1">
-                      <div className="grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
+                    <div className="space-y-2">
+                      <div className="hidden sm:grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
                         <span>Size</span>
                         <span>Color</span>
                         <span>SKU <span className="font-normal">(auto-generated, editable)</span></span>
@@ -1592,32 +1595,44 @@ export default function Products() {
                       {group.combinations.map((combo, ci) => (
                         <div
                           key={`${combo.size}-${combo.color}`}
-                          className="grid grid-cols-4 gap-2 items-center bg-background rounded-md p-2 border"
+                          className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-center bg-background rounded-md p-3 sm:p-2 border"
                         >
-                          <span className="text-sm font-medium">
-                            {combo.size || <span className="text-muted-foreground italic">—</span>}
-                          </span>
-                          <span className="text-sm font-medium">
-                            {combo.color || <span className="text-muted-foreground italic">—</span>}
-                          </span>
-                          <Input
-                            value={combo.sku}
-                            readOnly={
-                              !combo.skuManuallyEdited &&
-                              combo.sku === AUTO_SKU_PLACEHOLDER
-                            }
-                            onChange={(e) =>
-                              updateCombination(gi, ci, "sku", e.target.value.toUpperCase())
-                            }
-                            className="h-8 text-xs font-mono"
-                            placeholder="SKU"
-                          />
-                          <NumberInput
-                            value={combo.stock}
-                            onChange={(v) => updateCombination(gi, ci, "stock", v)}
-                            placeholder="0"
-                            className="h-8 text-sm"
-                          />
+                          <div className="flex items-center justify-between sm:block">
+                            <span className="text-xs text-muted-foreground sm:hidden">Size</span>
+                            <span className="text-sm font-medium">
+                              {combo.size || <span className="text-muted-foreground italic">—</span>}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between sm:block">
+                            <span className="text-xs text-muted-foreground sm:hidden">Color</span>
+                            <span className="text-sm font-medium">
+                              {combo.color || <span className="text-muted-foreground italic">—</span>}
+                            </span>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs text-muted-foreground sm:hidden">SKU</span>
+                            <Input
+                              value={combo.sku}
+                              readOnly={
+                                !combo.skuManuallyEdited &&
+                                combo.sku === AUTO_SKU_PLACEHOLDER
+                              }
+                              onChange={(e) =>
+                                updateCombination(gi, ci, "sku", e.target.value.toUpperCase())
+                              }
+                              className="h-8 text-xs font-mono"
+                              placeholder="SKU"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs text-muted-foreground sm:hidden">Stock</span>
+                            <NumberInput
+                              value={combo.stock}
+                              onChange={(v) => updateCombination(gi, ci, "stock", v)}
+                              placeholder="0"
+                              className="h-8 text-sm"
+                            />
+                          </div>
                         </div>
                       ))}
                       <p className="text-xs text-muted-foreground pt-1">

@@ -249,6 +249,7 @@ export default function Dashboard() {
     {
       key: "area",
       label: "Area",
+      hideOnMobile: true,
       render: (r) => {
         const shipping = parseShipping(r.shipping_address);
         return shipping?.area ? (
@@ -261,6 +262,7 @@ export default function Dashboard() {
     {
       key: "payment_method",
       label: "Method",
+      hideOnMobile: true,
       render: (r) => (
         <span className="text-xs uppercase font-semibold">
           {r.payments?.[0]?.payment_method || "N/A"}
@@ -288,6 +290,7 @@ export default function Dashboard() {
     {
       key: "date",
       label: "Date",
+      hideOnMobile: true,
       render: (r) => (
         <span className="text-xs text-muted-foreground">
           {format(new Date(r.created_at), "MMM dd, yyyy")}
@@ -307,7 +310,7 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Dashboard</h1>
+      <h1 className="text-xl sm:text-2xl font-bold">Dashboard</h1>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard title="Total Stock" value={stats.totalStock} icon={Package} />
@@ -316,10 +319,11 @@ export default function Dashboard() {
         <StatCard title="Low Stock Alert" value={stats.lowStockCount} icon={AlertTriangle} variant="warning" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="rounded-lg border bg-card p-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <div className="rounded-lg border bg-card p-4 sm:p-6">
           <h3 className="font-semibold mb-4">Weekly Sales</h3>
-          <ResponsiveContainer width="100%" height={250}>
+          <div className="h-[220px] sm:h-[250px]">
+            <ResponsiveContainer width="100%" height="100%">
             <BarChart data={weeklySales}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
               <XAxis dataKey="date" className="text-xs" />
@@ -328,12 +332,14 @@ export default function Dashboard() {
               <Bar dataKey="amount" fill="hsl(224, 60%, 25%)" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
+          </div>
         </div>
 
-        <div className="rounded-lg border bg-card p-6">
+        <div className="rounded-lg border bg-card p-4 sm:p-6">
           <h3 className="font-semibold mb-4">Top Selling Categories</h3>
           {topCategories.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
+            <div className="h-[220px] sm:h-[250px]">
+            <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
                   data={topCategories}
@@ -341,7 +347,7 @@ export default function Dashboard() {
                   nameKey="name"
                   cx="50%"
                   cy="50%"
-                  outerRadius={90}
+                  outerRadius={75}
                   label={({ name }: { name: string }) => name}
                 >
                   {topCategories.map((_, i) => (
@@ -351,6 +357,7 @@ export default function Dashboard() {
                 <Tooltip />
               </PieChart>
             </ResponsiveContainer>
+            </div>
           ) : (
             <p className="text-sm text-muted-foreground text-center py-16">No sales data yet</p>
           )}

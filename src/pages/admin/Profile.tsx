@@ -59,7 +59,7 @@ export default function Profile() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">Profile</h1>
+      <h1 className="text-xl sm:text-2xl font-bold">Profile</h1>
 
       <Card>
         <CardHeader>
@@ -70,19 +70,19 @@ export default function Profile() {
         </CardHeader>
 
         <CardContent className="space-y-3">
-          <div className="flex justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">Name</span>
-            <span className="font-medium">{profile?.name ?? "—"}</span>
+            <span className="font-medium break-words text-right sm:text-left">{profile?.name ?? "—"}</span>
           </div>
 
-          <div className="flex justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">Email</span>
-            <span className="font-medium">
+            <span className="font-medium break-all text-right sm:text-left">
               {profile?.email ?? user?.email ?? "—"}
             </span>
           </div>
 
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">Role</span>
             <Badge>
               <Shield className="h-3 w-3 mr-1" />
@@ -101,20 +101,20 @@ export default function Profile() {
         </CardHeader>
 
         <CardContent className="space-y-3">
-          <div className="flex justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">Created</span>
-            <span className="font-medium">
+            <span className="font-medium text-right sm:text-left">
               {user?.created_at
                 ? format(new Date(user.created_at), "MMM dd, yyyy")
                 : "—"}
             </span>
           </div>
 
-          <div className="flex justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">
               Last Sign In
             </span>
-            <span className="font-medium">
+            <span className="font-medium text-right sm:text-left">
               {user?.last_sign_in_at
                 ? format(new Date(user.last_sign_in_at), "MMM dd, yyyy HH:mm")
                 : "—"}
@@ -129,7 +129,7 @@ export default function Profile() {
         </CardHeader>
 
         <CardContent>
-          <div className="flex justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:justify-between sm:items-center">
             <span className="text-sm text-muted-foreground">
               Total Orders Managed
             </span>
