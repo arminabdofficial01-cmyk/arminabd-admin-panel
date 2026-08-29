@@ -1,0 +1,9 @@
+-- Promote an existing auth user to admin.
+-- Replace the email below, then run in the Supabase SQL editor.
+--
+-- Example:
+-- INSERT INTO public.user_roles (user_id, role)
+-- SELECT id, 'admin'::public.app_role
+-- FROM auth.users
+-- WHERE email = 'admin@example.com'
+-- ON CONFLICT (user_id, role) DO NOTHING;

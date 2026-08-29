@@ -1,0 +1,7 @@
+[
+  { "label": "Dashboard", "href": "/admin/dashboard", "icon": "LayoutDashboard" },
+  { "label": "Products", "href": "/admin/products", "icon": "Package" },
+  { "label": "Sales", "href": "/admin/sales", "icon": "BarChart3" },
+  { "label": "Settings", "href": "/admin/settings", "icon": "Settings" },
+  { "label": "Profile", "href": "/admin/profile", "icon": "User" }
+]
