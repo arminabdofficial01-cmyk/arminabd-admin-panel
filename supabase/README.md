@@ -16,6 +16,7 @@ Or apply the SQL files in `supabase/migrations/` manually via the Supabase SQL e
 - `20260229120000_add_admin_panel_columns.sql` — display_id, deleted_at, etc.
 - `20260229130000_product_variants_sku_active_unique.sql` — unique active SKUs
 - `20260229140000_product_variant_upsert_constraints.sql` — one variant per size+color per product
+- `20260229150000_backfill_product_display_ids.sql` — backfill display_id on existing products
 
 ## Promote an admin user
 

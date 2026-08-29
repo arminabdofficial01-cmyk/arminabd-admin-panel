@@ -203,15 +203,52 @@ function variantKey(size: string, color: string): string {
 }
 
 function generateVariantSku(displayId: string, size: string, color: string): string {
-  const parts = [displayId.trim().toUpperCase()];
-  const sizePart = size?.trim().toUpperCase();
-  const colorPart = color?.trim().toUpperCase();
+  const id = displayId.trim().toUpperCase();
+  const hasSize = Boolean(size?.trim());
+  const hasColor = Boolean(color?.trim());
 
-  if (sizePart) parts.push(sizePart);
-  if (colorPart) parts.push(colorPart);
-  if (!sizePart && !colorPart) parts.push("DEFAULT");
+  if (!hasSize && !hasColor) return `${id}-DEFAULT`;
+  if (hasSize && hasColor) {
+    return `${id}-${size.trim().toUpperCase()}-${color.trim().toUpperCase()}`;
+  }
+  if (hasSize) return `${id}-${size.trim().toUpperCase()}`;
+  return `${id}-DEFAULT-${color.trim().toUpperCase()}`;
+}
 
-  return parts.join("-");
+interface VariantLookup {
+  byKey: Map<string, string>;
+  bySku: Map<string, string>;
+}
+
+function buildVariantLookup(
+  variants: { id: string; size: string | null; color: string | null; sku: string }[]
+): VariantLookup {
+  const byKey = new Map<string, string>();
+  const bySku = new Map<string, string>();
+
+  for (const variant of variants) {
+    byKey.set(variantKey(variant.size || "", variant.color || ""), variant.id);
+    bySku.set(variant.sku.trim().toUpperCase(), variant.id);
+  }
+
+  return { byKey, bySku };
+}
+
+function resolveVariantId(
+  combo: VariantCombination,
+  lookup: VariantLookup
+): string | null {
+  if (combo.id) return combo.id;
+
+  const keyMatch = lookup.byKey.get(variantKey(combo.size, combo.color));
+  if (keyMatch) return keyMatch;
+
+  const sku = combo.sku.trim().toUpperCase();
+  if (sku && sku !== AUTO_SKU_PLACEHOLDER.toUpperCase()) {
+    return lookup.bySku.get(sku) ?? null;
+  }
+
+  return null;
 }
 
 function findDuplicateVariantKeys(combos: VariantCombination[]): string | null {
@@ -237,15 +274,62 @@ function findDuplicateSkus(skus: string[]): string | null {
 
 function resolveVariantSkus(
   combos: VariantCombination[],
-  displayId: string
+  displayId: string,
+  options: { isCreateFlow: boolean }
 ): VariantCombination[] {
-  return combos.map((combo) => ({
-    ...combo,
-    sku:
-      combo.skuManuallyEdited && combo.sku !== AUTO_SKU_PLACEHOLDER
-        ? combo.sku.trim().toUpperCase()
-        : generateVariantSku(displayId, combo.size, combo.color),
-  }));
+  return combos.map((combo) => {
+    const autoSku = generateVariantSku(displayId, combo.size, combo.color);
+    const keepManualSku =
+      !options.isCreateFlow &&
+      combo.skuManuallyEdited &&
+      combo.sku !== AUTO_SKU_PLACEHOLDER;
+
+    return {
+      ...combo,
+      sku: keepManualSku ? combo.sku.trim().toUpperCase() : autoSku,
+    };
+  });
+}
+
+async function ensureProductDisplayId(productId: string): Promise<string> {
+  const { data: productRow, error: productRowError } = await supabase
+    .from("products")
+    .select("display_id")
+    .eq("id", productId)
+    .single();
+
+  if (productRowError) {
+    throw new Error(`Failed to load product display ID: ${productRowError.message}`);
+  }
+
+  if (productRow?.display_id) return productRow.display_id;
+
+  const { data: maxRows, error: maxError } = await supabase
+    .from("products")
+    .select("display_id")
+    .like("display_id", "PRD-%")
+    .order("display_id", { ascending: false })
+    .limit(1);
+
+  if (maxError) {
+    throw new Error(`Failed to assign product display ID: ${maxError.message}`);
+  }
+
+  const nextNum = maxRows?.[0]?.display_id
+    ? parseInt(maxRows[0].display_id.slice(4), 10) + 1
+    : 1;
+  const displayId = `PRD-${String(nextNum).padStart(6, "0")}`;
+
+  const { error: updateError } = await supabase
+    .from("products")
+    .update({ display_id: displayId })
+    .eq("id", productId);
+
+  if (updateError) {
+    throw new Error(`Failed to assign product display ID: ${updateError.message}`);
+  }
+
+  return displayId;
 }
 
 async function findExistingProduct(
@@ -280,27 +364,6 @@ async function findExistingProduct(
     display_id: match.display_id,
     name: match.name,
   };
-}
-
-async function findExistingVariantId(
-  productId: string,
-  size: string,
-  color: string
-): Promise<string | null> {
-  const { data, error } = await supabase
-    .from("product_variants")
-    .select("id, size, color")
-    .eq("product_id", productId)
-    .is("deleted_at", null);
-
-  if (error) throw new Error(`Variant lookup failed: ${error.message}`);
-
-  const targetKey = variantKey(size, color);
-  const match = (data || []).find(
-    (variant) => variantKey(variant.size || "", variant.color || "") === targetKey
-  );
-
-  return match?.id ?? null;
 }
 
 async function findConflictingSkusInDb(
@@ -458,10 +521,39 @@ export default function Products() {
       const existing = await findExistingProduct(name, categoryId || null);
       if (existing) {
         setMergePreview(existing);
-        if (existing.display_id) {
-          setProductDisplayId(existing.display_id);
-          rebuildVariantSkus(existing.display_id);
-        }
+        const displayId = existing.display_id;
+        if (displayId) setProductDisplayId(displayId);
+
+        const { data: variants, error: variantsError } = await supabase
+          .from("product_variants")
+          .select("id, size, color, stock, sku")
+          .eq("product_id", existing.id)
+          .is("deleted_at", null);
+
+        if (variantsError) throw new Error(`Variant lookup failed: ${variantsError.message}`);
+
+        setForm((f) => ({
+          ...f,
+          variantGroups: f.variantGroups.map((group) => ({
+            ...group,
+            combinations: group.combinations.map((combo) => {
+              const match = (variants || []).find(
+                (variant) =>
+                  variantKey(variant.size || "", variant.color || "") ===
+                  variantKey(combo.size, combo.color)
+              );
+              return {
+                ...combo,
+                id: match?.id,
+                stock: match ? String(match.stock) : combo.stock,
+                sku: displayId
+                  ? generateVariantSku(displayId, combo.size, combo.color)
+                  : AUTO_SKU_PLACEHOLDER,
+                skuManuallyEdited: false,
+              };
+            }),
+          })),
+        }));
       } else {
         setMergePreview(null);
         setProductDisplayId(null);
@@ -831,18 +923,19 @@ export default function Products() {
 
       if (!productId) throw new Error("Failed to get product ID");
 
-      const { data: productRow, error: productRowError } = await supabase
-        .from("products")
-        .select("display_id")
-        .eq("id", productId)
-        .single();
+      const displayId = await ensureProductDisplayId(productId);
+      const resolvedCombos = resolveVariantSkus(allCombos, displayId, {
+        isCreateFlow,
+      });
 
-      if (productRowError || !productRow?.display_id) {
-        throw new Error("Failed to load product display ID");
+      const duplicateResolvedSku = findDuplicateSkus(
+        resolvedCombos.map((combo) => combo.sku)
+      );
+      if (duplicateResolvedSku) {
+        throw new Error(
+          `Duplicate SKU in form: ${duplicateResolvedSku}. Each variant needs a unique SKU.`
+        );
       }
-
-      const displayId = productRow.display_id;
-      const resolvedCombos = resolveVariantSkus(allCombos, displayId);
 
       const manualSkus = resolvedCombos
         .filter((combo) => combo.skuManuallyEdited)
@@ -856,7 +949,7 @@ export default function Products() {
 
       const { data: ownVariants, error: ownVariantsError } = await supabase
         .from("product_variants")
-        .select("id")
+        .select("id, size, color, sku")
         .eq("product_id", productId)
         .is("deleted_at", null);
 
@@ -864,6 +957,7 @@ export default function Products() {
         throw new Error(`Variant lookup failed: ${ownVariantsError.message}`);
       }
 
+      const variantLookup = buildVariantLookup(ownVariants || []);
       const excludeVariantIds = (ownVariants || []).map((variant) => variant.id);
       const conflictingSkus = await findConflictingSkusInDb(
         resolvedCombos.map((combo) => combo.sku),
@@ -886,10 +980,7 @@ export default function Products() {
           stock: parseInt(combo.stock, 10) || 0,
         };
 
-        let variantId = combo.id ?? null;
-        if (!variantId) {
-          variantId = await findExistingVariantId(productId, combo.size, combo.color);
-        }
+        const variantId = resolveVariantId(combo, variantLookup);
 
         if (variantId) {
           const { error } = await supabase
@@ -904,6 +995,22 @@ export default function Products() {
             .insert(variantPayload)
             .select("id")
             .single();
+
+          if (error?.message?.includes("product_variants_sku_active_unique")) {
+            const fallbackId = variantLookup.bySku.get(combo.sku.trim().toUpperCase());
+            if (fallbackId) {
+              const { error: updateError } = await supabase
+                .from("product_variants")
+                .update(variantPayload)
+                .eq("id", fallbackId);
+              if (updateError) {
+                throw new Error(`Variant update error: ${updateError.message}`);
+              }
+              keptVariantIds.push(fallbackId);
+              continue;
+            }
+          }
+
           if (error) throw new Error(`Variant insert error: ${error.message}`);
           if (data?.id) keptVariantIds.push(data.id);
         }
