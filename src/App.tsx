@@ -11,6 +11,7 @@ import Unauthorized from "./pages/Unauthorized";
 import NotFound from "./pages/NotFound";
 import Dashboard from "./pages/admin/Dashboard";
 import Products from "./pages/admin/Products";
+import Categories from "./pages/admin/Categories";
 import Sales from "./pages/admin/Sales";
 import Settings from "./pages/admin/Settings";
 import Profile from "./pages/admin/Profile";
@@ -39,6 +40,7 @@ const App = () => (
               <Route index element={<Navigate to="dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="products" element={<Products />} />
+              <Route path="categories" element={<Categories />} />
               <Route path="sales" element={<Sales />} />
               <Route path="settings" element={<Settings />} />
               <Route path="profile" element={<Profile />} />

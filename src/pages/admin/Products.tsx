@@ -3,7 +3,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { StatCard } from "@/components/cards/StatCard";
 import { DataTable, Column } from "@/components/table/DataTable";
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
-import { Package, CheckCircle, AlertTriangle, XCircle, Plus, Pencil, Trash2, Eye, X } from "lucide-react";
+import { TagInput, normalizeTagList } from "@/components/TagInput";
+import { Package, CheckCircle, AlertTriangle, XCircle, Plus, Pencil, Trash2, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,8 @@ import { toast } from "sonner";
 interface Category {
   id: string;
   name: string;
+  sizes: string[];
+  colors: string[];
 }
 
 interface ProductImage {
@@ -127,61 +130,21 @@ interface ProductForm {
   imagePreviews: string[];
 }
 
+const emptyVariantGroup: VariantGroup = {
+  sizes: [],
+  colors: [],
+  combinations: [],
+};
+
 const emptyForm: ProductForm = {
   name: "", short_description: "", description: "", category_id: "",
   base_price: "", discounted_price: "",
   is_active: true, is_featured: false,
-  variantGroups: [], images: [], imagePreviews: [],
+  variantGroups: [emptyVariantGroup], images: [], imagePreviews: [],
 };
 
-// ─── Tag Input ────────────────────────────────────────────────────────────────
-
-function TagInput({
-  values,
-  onChange,
-  placeholder,
-}: {
-  values: string[];
-  onChange: (v: string[]) => void;
-  placeholder?: string;
-}) {
-  const [input, setInput] = useState("");
-
-  function addTag(raw: string) {
-    const tag = raw.trim();
-    if (tag && !values.includes(tag)) onChange([...values, tag]);
-    setInput("");
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter" || e.key === ",") {
-      e.preventDefault();
-      addTag(input);
-    } else if (e.key === "Backspace" && !input && values.length) {
-      onChange(values.slice(0, -1));
-    }
-  }
-
-  return (
-    <div className="flex flex-wrap gap-1 border rounded-md px-2 py-1 min-h-9 items-center focus-within:ring-1 focus-within:ring-ring">
-      {values.map((v) => (
-        <span key={v} className="flex items-center gap-1 bg-secondary text-secondary-foreground text-xs px-2 py-0.5 rounded">
-          {v}
-          <button type="button" onClick={() => onChange(values.filter((x) => x !== v))} className="hover:text-destructive">
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      <input
-        className="flex-1 min-w-16 text-sm outline-none bg-transparent"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={handleKeyDown}
-        onBlur={() => input && addTag(input)}
-        placeholder={values.length === 0 ? placeholder : ""}
-      />
-    </div>
-  );
+function unionTags(...lists: string[][]): string[] {
+  return normalizeTagList(lists.flat());
 }
 
 // ─── SKU & product identity helpers ───────────────────────────────────────────
@@ -450,6 +413,30 @@ function buildCombinations(
   return combos;
 }
 
+function buildVariantGroupFromCategory(
+  category: Category | undefined,
+  existingGroup: VariantGroup | undefined,
+  displayId: string | null
+): VariantGroup {
+  const existingCombos = existingGroup?.combinations ?? [];
+  const sizes = unionTags(
+    category?.sizes ?? [],
+    existingGroup?.sizes ?? [],
+    existingCombos.map((combo) => combo.size)
+  );
+  const colors = unionTags(
+    category?.colors ?? [],
+    existingGroup?.colors ?? [],
+    existingCombos.map((combo) => combo.color)
+  );
+
+  const group: VariantGroup = { sizes, colors, combinations: [] };
+  return {
+    ...group,
+    combinations: buildCombinations(group, displayId, existingCombos),
+  };
+}
+
 // ─── Helper: extract storage path from public URL ────────────────────────────
 
 function extractStoragePath(imageUrl: string): string | null {
@@ -658,15 +645,37 @@ export default function Products() {
   useEffect(() => {
     supabase
       .from("categories")
-      .select("*")
+      .select("id, name, sizes, colors")
+      .order("name")
       .then(({ data, error }) => {
         if (error) {
           toast.error(`Failed to load categories: ${error.message}`);
           return;
         }
-        setCategories((data as Category[]) || []);
+        setCategories(
+          (data || []).map((row) => ({
+            id: row.id,
+            name: row.name,
+            sizes: row.sizes || [],
+            colors: row.colors || [],
+          }))
+        );
       });
   }, []);
+
+  function handleCategoryChange(categoryId: string) {
+    const category = categories.find((item) => item.id === categoryId);
+    const displayId = getEffectiveDisplayId();
+
+    setForm((f) => ({
+      ...f,
+      category_id: categoryId,
+      variantGroups: [
+        buildVariantGroupFromCategory(category, f.variantGroups[0], displayId),
+      ],
+    }));
+    void checkForExistingProduct(form.name, categoryId);
+  }
 
   function resetImageState() {
     setExistingImages([]);
@@ -677,7 +686,10 @@ export default function Products() {
 
   function openAdd() {
     setEditingId(null);
-    setForm(emptyForm);
+    setForm({
+      ...emptyForm,
+      variantGroups: [{ sizes: [], colors: [], combinations: [] }],
+    });
     setProductDisplayId(null);
     setMergePreview(null);
     resetImageState();
@@ -722,8 +734,26 @@ export default function Products() {
         stock: String(v.stock),
         skuManuallyEdited: true,
       }));
-      const sizes = [...new Set(combinations.map((c) => c.size).filter(Boolean))];
-      const colors = [...new Set(combinations.map((c) => c.color).filter(Boolean))];
+      const category = categories.find((item) => item.id === product.category_id);
+      const sizes = unionTags(
+        category?.sizes ?? [],
+        combinations.map((c) => c.size)
+      );
+      const colors = unionTags(
+        category?.colors ?? [],
+        combinations.map((c) => c.color)
+      );
+      const variantGroup: VariantGroup = {
+        sizes,
+        colors,
+        combinations: combinations.length > 0
+          ? buildCombinations(
+              { sizes, colors, combinations: [] },
+              product.display_id || null,
+              combinations
+            )
+          : [],
+      };
       setForm({
         name: product.name,
         short_description: product.short_description || "",
@@ -733,7 +763,7 @@ export default function Products() {
         discounted_price: product.discounted_price ? String(product.discounted_price) : "",
         is_active: product.is_active,
         is_featured: product.is_featured,
-        variantGroups: combinations.length > 0 ? [{ sizes, colors, combinations }] : [],
+        variantGroups: [variantGroup],
         images: [],
         imagePreviews: [],
       });
@@ -834,22 +864,8 @@ export default function Products() {
     });
   }
 
-  function addVariantGroup() {
-    setForm((f) => ({
-      ...f,
-      variantGroups: [
-        ...f.variantGroups,
-        { sizes: [], colors: [], combinations: [] },
-      ],
-    }));
-  }
-
-  function removeVariantGroup(groupIdx: number) {
-    setForm((f) => ({
-      ...f,
-      variantGroups: f.variantGroups.filter((_, i) => i !== groupIdx),
-    }));
-  }
+  const selectedCategory = categories.find((item) => item.id === form.category_id);
+  const variantGroup = form.variantGroups[0] ?? emptyVariantGroup;
 
   // ─── Save ───────────────────────────────────────────────────────────────────
 
@@ -1376,13 +1392,7 @@ export default function Products() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label>Category</Label>
-                <Select
-                  value={form.category_id}
-                  onValueChange={(v) => {
-                    setForm((f) => ({ ...f, category_id: v }));
-                    void checkForExistingProduct(form.name, v);
-                  }}
-                >
+                <Select value={form.category_id} onValueChange={handleCategoryChange}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
@@ -1423,6 +1433,20 @@ export default function Products() {
                 />
               </div>
             </div>
+
+            {form.category_id && (
+              <p className="text-xs text-muted-foreground">
+                Default options from category. You can add extra sizes/colors below.
+              </p>
+            )}
+            {form.category_id &&
+              selectedCategory &&
+              selectedCategory.sizes.length === 0 &&
+              selectedCategory.colors.length === 0 && (
+                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                  No variant options set for this category — add them here or in Categories.
+                </p>
+              )}
 
             {/* Price preview */}
             {form.discounted_price &&
@@ -1532,133 +1556,122 @@ export default function Products() {
 
             {/* Variants */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label>Variants</Label>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Add sizes and colors — each combination gets its own SKU and stock count.
-                  </p>
-                </div>
-                <Button type="button" variant="outline" size="sm" onClick={addVariantGroup}>
-                  <Plus className="h-3 w-3 mr-1" /> Add Variant Group
-                </Button>
+              <div>
+                <Label>Variants</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Select a category for defaults, or add sizes and colors manually. Each combination gets its own SKU and stock.
+                </p>
               </div>
 
-              {form.variantGroups.length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-6 border rounded-md border-dashed">
-                  No variants yet. Click "Add Variant Group" to add sizes and colors.
+              {!form.category_id && (
+                <p className="text-sm text-muted-foreground text-center py-4 border rounded-md border-dashed">
+                  Select a category to load default variant options.
                 </p>
               )}
 
-              {form.variantGroups.map((group, gi) => (
-                <div key={gi} className="border rounded-lg p-4 space-y-4 bg-muted/20">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">Variant Group {gi + 1}</p>
-                    <Button variant="ghost" size="sm" onClick={() => removeVariantGroup(gi)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+              <div className="border rounded-lg p-4 space-y-4 bg-muted/20">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs mb-1 block">
+                      Sizes{" "}
+                      <span className="text-muted-foreground">(press Enter or comma)</span>
+                    </Label>
+                    <TagInput
+                      values={variantGroup.sizes}
+                      onChange={(v) => updateGroupSizesOrColors(0, "sizes", v)}
+                      placeholder="e.g. S, M, L, XL"
+                    />
                   </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <Label className="text-xs mb-1 block">
-                        Sizes{" "}
-                        <span className="text-muted-foreground">(press Enter or comma)</span>
-                      </Label>
-                      <TagInput
-                        values={group.sizes}
-                        onChange={(v) => updateGroupSizesOrColors(gi, "sizes", v)}
-                        placeholder="e.g. S, M, L, XL"
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs mb-1 block">
-                        Colors{" "}
-                        <span className="text-muted-foreground">(press Enter or comma)</span>
-                      </Label>
-                      <TagInput
-                        values={group.colors}
-                        onChange={(v) => updateGroupSizesOrColors(gi, "colors", v)}
-                        placeholder="e.g. Red, Blue, White"
-                      />
-                    </div>
+                  <div>
+                    <Label className="text-xs mb-1 block">
+                      Colors{" "}
+                      <span className="text-muted-foreground">(press Enter or comma)</span>
+                    </Label>
+                    <TagInput
+                      values={variantGroup.colors}
+                      onChange={(v) => updateGroupSizesOrColors(0, "colors", v)}
+                      placeholder="e.g. Red, Blue, White"
+                    />
                   </div>
-
-                  {group.combinations.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="hidden sm:grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
-                        <span>Size</span>
-                        <span>Color</span>
-                        <span>SKU <span className="font-normal">(auto-generated, editable)</span></span>
-                        <span>Stock</span>
-                      </div>
-                      {group.combinations.map((combo, ci) => (
-                        <div
-                          key={`${combo.size}-${combo.color}`}
-                          className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-center bg-background rounded-md p-3 sm:p-2 border"
-                        >
-                          <div className="flex items-center justify-between sm:block">
-                            <span className="text-xs text-muted-foreground sm:hidden">Size</span>
-                            <span className="text-sm font-medium">
-                              {combo.size || <span className="text-muted-foreground italic">—</span>}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between sm:block">
-                            <span className="text-xs text-muted-foreground sm:hidden">Color</span>
-                            <span className="text-sm font-medium">
-                              {combo.color || <span className="text-muted-foreground italic">—</span>}
-                            </span>
-                          </div>
-                          <div className="space-y-1">
-                            <span className="text-xs text-muted-foreground sm:hidden">SKU</span>
-                            <Input
-                              value={combo.sku}
-                              readOnly={
-                                !combo.skuManuallyEdited &&
-                                combo.sku === AUTO_SKU_PLACEHOLDER
-                              }
-                              onChange={(e) =>
-                                updateCombination(gi, ci, "sku", e.target.value.toUpperCase())
-                              }
-                              className="h-8 text-xs font-mono"
-                              placeholder="SKU"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <span className="text-xs text-muted-foreground sm:hidden">Stock</span>
-                            <NumberInput
-                              value={combo.stock}
-                              onChange={(v) => updateCombination(gi, ci, "stock", v)}
-                              placeholder="0"
-                              className="h-8 text-sm"
-                            />
-                          </div>
-                        </div>
-                      ))}
-                      <p className="text-xs text-muted-foreground pt-1">
-                        Total stock for this group:{" "}
-                        <span className="font-semibold">
-                          {group.combinations.reduce((sum, c) => sum + (parseInt(c.stock) || 0), 0)}
-                        </span>
-                      </p>
-                    </div>
-                  )}
-
-                  {group.combinations.length === 0 &&
-                    (group.sizes.length > 0 || group.colors.length > 0) && (
-                      <p className="text-xs text-muted-foreground text-center py-2">
-                        Add both sizes and colors to see combinations, or add just one to create
-                        single-dimension variants.
-                      </p>
-                    )}
                 </div>
-              ))}
 
-              {form.variantGroups.some((g) => g.combinations.length > 0) && (
+                {variantGroup.combinations.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="hidden sm:grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
+                      <span>Size</span>
+                      <span>Color</span>
+                      <span>SKU <span className="font-normal">(auto-generated, editable)</span></span>
+                      <span>Stock</span>
+                    </div>
+                    {variantGroup.combinations.map((combo, ci) => (
+                      <div
+                        key={`${combo.size}-${combo.color}`}
+                        className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-center bg-background rounded-md p-3 sm:p-2 border"
+                      >
+                        <div className="flex items-center justify-between sm:block">
+                          <span className="text-xs text-muted-foreground sm:hidden">Size</span>
+                          <span className="text-sm font-medium">
+                            {combo.size || <span className="text-muted-foreground italic">—</span>}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between sm:block">
+                          <span className="text-xs text-muted-foreground sm:hidden">Color</span>
+                          <span className="text-sm font-medium">
+                            {combo.color || <span className="text-muted-foreground italic">—</span>}
+                          </span>
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-xs text-muted-foreground sm:hidden">SKU</span>
+                          <Input
+                            value={combo.sku}
+                            readOnly={
+                              !combo.skuManuallyEdited &&
+                              combo.sku === AUTO_SKU_PLACEHOLDER
+                            }
+                            onChange={(e) =>
+                              updateCombination(0, ci, "sku", e.target.value.toUpperCase())
+                            }
+                            className="h-8 text-xs font-mono"
+                            placeholder="SKU"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-xs text-muted-foreground sm:hidden">Stock</span>
+                          <NumberInput
+                            value={combo.stock}
+                            onChange={(v) => updateCombination(0, ci, "stock", v)}
+                            placeholder="0"
+                            className="h-8 text-sm"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    <p className="text-xs text-muted-foreground pt-1">
+                      Total stock:{" "}
+                      <span className="font-semibold">
+                        {variantGroup.combinations.reduce(
+                          (sum, combo) => sum + (parseInt(combo.stock, 10) || 0),
+                          0
+                        )}
+                      </span>
+                    </p>
+                  </div>
+                )}
+
+                {variantGroup.combinations.length === 0 &&
+                  (variantGroup.sizes.length > 0 || variantGroup.colors.length > 0) && (
+                    <p className="text-xs text-muted-foreground text-center py-2">
+                      Add both sizes and colors to see combinations, or add just one to create
+                      single-dimension variants.
+                    </p>
+                  )}
+              </div>
+
+              {variantGroup.combinations.length > 0 && (
                 <div className="flex justify-end text-sm font-semibold">
                   Total Stock:{" "}
-                  {form.variantGroups.reduce(
-                    (t, g) => t + g.combinations.reduce((s, c) => s + (parseInt(c.stock) || 0), 0),
+                  {variantGroup.combinations.reduce(
+                    (sum, combo) => sum + (parseInt(combo.stock, 10) || 0),
                     0
                   )}
                 </div>
