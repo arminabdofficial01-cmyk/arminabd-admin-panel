@@ -17,6 +17,7 @@ import {
   resolveVariantSkus,
   buildVariantLookup,
   resolveVariantId,
+  VariantLookup,
   syncLegacySizeColor,
   legacyAttributesFromVariant,
   formatAttributesLabel,
@@ -205,13 +206,15 @@ async function findExistingProduct(
   name: string,
   categoryId: string | null
 ): Promise<ExistingProductMatch | null> {
-  const normalizedName = normalizeProductName(name);
-  if (!normalizedName) return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
 
   let query = supabase
     .from("products")
-    .select("id, display_id, name, category_id")
-    .is("deleted_at", null);
+    .select("id, display_id, name")
+    .is("deleted_at", null)
+    .ilike("name", trimmed)
+    .limit(1);
 
   if (categoryId) {
     query = query.eq("category_id", categoryId);
@@ -222,11 +225,10 @@ async function findExistingProduct(
   const { data, error } = await query;
   if (error) throw new Error(`Product lookup failed: ${error.message}`);
 
-  const match = (data || []).find(
-    (product) => normalizeProductName(product.name) === normalizedName
-  );
-
-  if (!match) return null;
+  const match = data?.[0];
+  if (!match || normalizeProductName(match.name) !== normalizeProductName(trimmed)) {
+    return null;
+  }
 
   return {
     id: match.id,
@@ -352,6 +354,197 @@ function buildImageStoragePath(productId: string, file: File): string {
   const ext = file.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
   const safeExt = IMAGE_EXTENSIONS.has(ext) ? ext : "jpg";
   return `${productId}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}.${safeExt}`;
+}
+
+const VARIANT_UPDATE_CHUNK = 20;
+
+interface VariantPersistPayload {
+  product_id: string;
+  attributes: Record<string, string>;
+  size: string | null;
+  color: string | null;
+  sku: string;
+  stock: number;
+  expires_at: string | null;
+}
+
+function buildVariantPayload(
+  productId: string,
+  combo: VariantCombination
+): VariantPersistPayload {
+  const legacy = syncLegacySizeColor(combo.attributes);
+  return {
+    product_id: productId,
+    attributes: combo.attributes,
+    size: legacy.size,
+    color: legacy.color,
+    sku: combo.sku,
+    stock: parseInt(combo.stock, 10) || 0,
+    expires_at: combo.expires_at || null,
+  };
+}
+
+async function persistProductVariants(
+  productId: string,
+  combos: VariantCombination[],
+  lookup: VariantLookup
+): Promise<string[]> {
+  const keptVariantIds: string[] = [];
+  const toInsert: VariantPersistPayload[] = [];
+  const toUpdate: Array<{ id: string; payload: VariantPersistPayload }> = [];
+
+  for (const combo of combos) {
+    const payload = buildVariantPayload(productId, combo);
+    const variantId = resolveVariantId(combo, lookup);
+
+    if (variantId) {
+      toUpdate.push({ id: variantId, payload });
+      keptVariantIds.push(variantId);
+    } else {
+      toInsert.push(payload);
+    }
+  }
+
+  for (let i = 0; i < toUpdate.length; i += VARIANT_UPDATE_CHUNK) {
+    const chunk = toUpdate.slice(i, i + VARIANT_UPDATE_CHUNK);
+    const results = await Promise.all(
+      chunk.map(({ id, payload }) =>
+        supabase.from("product_variants").update(payload).eq("id", id)
+      )
+    );
+
+    const failed = results.find((result) => result.error);
+    if (failed?.error) {
+      throw new Error(`Variant update error: ${failed.error.message}`);
+    }
+  }
+
+  if (toInsert.length === 0) return keptVariantIds;
+
+  const { data: inserted, error: batchInsertError } = await supabase
+    .from("product_variants")
+    .insert(toInsert)
+    .select("id");
+
+  if (!batchInsertError) {
+    keptVariantIds.push(...(inserted || []).map((row) => row.id));
+    return keptVariantIds;
+  }
+
+  if (!batchInsertError.message.includes("product_variants_sku_active_unique")) {
+    throw new Error(`Variant insert error: ${batchInsertError.message}`);
+  }
+
+  const insertResults = await Promise.all(
+    toInsert.map(async (payload) => {
+      const { data, error } = await supabase
+        .from("product_variants")
+        .insert(payload)
+        .select("id")
+        .single();
+
+      if (error?.message?.includes("product_variants_sku_active_unique")) {
+        const fallbackId = lookup.bySku.get(payload.sku.trim().toUpperCase());
+        if (fallbackId) {
+          const { error: updateError } = await supabase
+            .from("product_variants")
+            .update(payload)
+            .eq("id", fallbackId);
+          if (updateError) {
+            throw new Error(`Variant update error: ${updateError.message}`);
+          }
+          return fallbackId;
+        }
+      }
+
+      if (error) throw new Error(`Variant insert error: ${error.message}`);
+      return data?.id ?? null;
+    })
+  );
+
+  keptVariantIds.push(...insertResults.filter((id): id is string => Boolean(id)));
+  return keptVariantIds;
+}
+
+async function removeProductImages(
+  removedIds: string[],
+  existingImages: ProductImage[]
+): Promise<void> {
+  if (removedIds.length === 0) return;
+
+  await Promise.all(
+    removedIds.map(async (imageId) => {
+      const image = existingImages.find((img) => img.id === imageId);
+      if (!image) return;
+
+      const storagePath = extractStoragePath(image.image_url);
+      if (storagePath) {
+        await supabase.storage.from("products").remove([storagePath]);
+      }
+
+      const { error } = await supabase.from("product_images").delete().eq("id", imageId);
+      if (error) throw new Error(`Failed to delete image: ${error.message}`);
+    })
+  );
+}
+
+async function uploadProductImages(
+  productId: string,
+  files: File[],
+  visibleImageCount: number
+): Promise<void> {
+  if (files.length === 0) return;
+
+  for (const file of files) {
+    if (file.size > 5 * 1024 * 1024) {
+      throw new Error(`Image ${file.name} exceeds 5MB limit.`);
+    }
+    if (!isImageFile(file)) {
+      throw new Error(`File ${file.name} is not a supported image type.`);
+    }
+  }
+
+  const uploadPlans = files.map((file, index) => ({
+    file,
+    path: buildImageStoragePath(productId, file),
+    contentType: getImageContentType(file),
+    sortOrder: visibleImageCount + index,
+    isPrimary: visibleImageCount === 0 && index === 0,
+  }));
+
+  const uploadedPaths: string[] = [];
+
+  const imageRows = await Promise.all(
+    uploadPlans.map(async (plan) => {
+      const { error: uploadError } = await supabase.storage
+        .from("products")
+        .upload(plan.path, plan.file, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: plan.contentType,
+        });
+
+      if (uploadError) {
+        throw new Error(`Image upload failed: ${uploadError.message}`);
+      }
+
+      uploadedPaths.push(plan.path);
+      const { data: urlData } = supabase.storage.from("products").getPublicUrl(plan.path);
+
+      return {
+        product_id: productId,
+        image_url: urlData.publicUrl,
+        is_primary: plan.isPrimary,
+        sort_order: plan.sortOrder,
+      };
+    })
+  );
+
+  const { error: dbError } = await supabase.from("product_images").insert(imageRows);
+  if (dbError) {
+    await supabase.storage.from("products").remove(uploadedPaths);
+    throw new Error(`Failed to save image record: ${dbError.message}`);
+  }
 }
 
 function combosFromDbVariants(variants: ProductVariant[]): VariantCombination[] {
@@ -857,7 +1050,8 @@ export default function Products() {
 
       if (!productId) throw new Error("Failed to get product ID");
 
-      const displayId = await ensureProductDisplayId(productId);
+      const cachedDisplayId = productDisplayId || mergePreview?.display_id || null;
+      const displayId = cachedDisplayId ?? (await ensureProductDisplayId(productId));
       const resolvedCombos = resolveVariantSkus(allCombos, displayId, {
         isCreateFlow,
       });
@@ -903,71 +1097,17 @@ export default function Products() {
         );
       }
 
-      const keptVariantIds: string[] = [];
-
-      for (const combo of resolvedCombos) {
-        const legacy = syncLegacySizeColor(combo.attributes);
-        const variantPayload = {
-          product_id: productId,
-          attributes: combo.attributes,
-          size: legacy.size,
-          color: legacy.color,
-          sku: combo.sku,
-          stock: parseInt(combo.stock, 10) || 0,
-          expires_at: combo.expires_at || null,
-        };
-
-        const variantId = resolveVariantId(combo, variantLookup);
-
-        if (variantId) {
-          const { error } = await supabase
-            .from("product_variants")
-            .update(variantPayload)
-            .eq("id", variantId);
-          if (error) throw new Error(`Variant update error: ${error.message}`);
-          keptVariantIds.push(variantId);
-        } else {
-          const { data, error } = await supabase
-            .from("product_variants")
-            .insert(variantPayload)
-            .select("id")
-            .single();
-
-          if (error?.message?.includes("product_variants_sku_active_unique")) {
-            const fallbackId = variantLookup.bySku.get(combo.sku.trim().toUpperCase());
-            if (fallbackId) {
-              const { error: updateError } = await supabase
-                .from("product_variants")
-                .update(variantPayload)
-                .eq("id", fallbackId);
-              if (updateError) {
-                throw new Error(`Variant update error: ${updateError.message}`);
-              }
-              keptVariantIds.push(fallbackId);
-              continue;
-            }
-          }
-
-          if (error) throw new Error(`Variant insert error: ${error.message}`);
-          if (data?.id) keptVariantIds.push(data.id);
-        }
-      }
+      const keptVariantIds = await persistProductVariants(
+        productId,
+        resolvedCombos,
+        variantLookup
+      );
 
       shouldRollbackProduct = false;
 
       if (editingId) {
         const now = new Date().toISOString();
-        const { data: existingVariants, error: fetchVariantsError } = await supabase
-          .from("product_variants")
-          .select("id")
-          .eq("product_id", editingId)
-          .is("deleted_at", null);
-
-        if (fetchVariantsError) {
-          throw new Error(`Variant cleanup error: ${fetchVariantsError.message}`);
-        }
-
-        const toSoftDelete = (existingVariants || [])
+        const toSoftDelete = (ownVariants || [])
           .map((variant) => variant.id)
           .filter((id) => !keptVariantIds.includes(id));
 
@@ -983,24 +1123,7 @@ export default function Products() {
         }
       }
 
-      for (const imageId of removedImageIds) {
-        const image = existingImages.find((img) => img.id === imageId);
-        if (!image) continue;
-
-        const storagePath = extractStoragePath(image.image_url);
-        if (storagePath) {
-          await supabase.storage.from("products").remove([storagePath]);
-        }
-
-        const { error: imageDeleteError } = await supabase
-          .from("product_images")
-          .delete()
-          .eq("id", imageId);
-
-        if (imageDeleteError) {
-          throw new Error(`Failed to delete image: ${imageDeleteError.message}`);
-        }
-      }
+      await removeProductImages(removedImageIds, existingImages);
 
       const visibleImageCount = visibleExistingImages.length;
 
@@ -1009,46 +1132,7 @@ export default function Products() {
           throw new Error("Maximum 3 images allowed per product.");
         }
 
-        for (let i = 0; i < form.images.length; i++) {
-          const file = form.images[i];
-          if (file.size > 5 * 1024 * 1024) {
-            throw new Error(`Image ${file.name} exceeds 5MB limit.`);
-          }
-          if (!isImageFile(file)) {
-            throw new Error(`File ${file.name} is not a supported image type.`);
-          }
-
-          const path = buildImageStoragePath(productId, file);
-          const contentType = getImageContentType(file);
-
-          const { error: uploadError } = await supabase.storage
-            .from("products")
-            .upload(path, file, {
-              cacheControl: "3600",
-              upsert: false,
-              contentType,
-            });
-
-          if (uploadError) {
-            throw new Error(`Image upload failed: ${uploadError.message}`);
-          }
-
-          const { data: urlData } = supabase.storage.from("products").getPublicUrl(path);
-
-          const isPrimary = visibleImageCount === 0 && i === 0;
-
-          const { error: dbError } = await supabase.from("product_images").insert({
-            product_id: productId,
-            image_url: urlData.publicUrl,
-            is_primary: isPrimary,
-            sort_order: visibleImageCount + i,
-          });
-
-          if (dbError) {
-            await supabase.storage.from("products").remove([path]);
-            throw new Error(`Failed to save image record: ${dbError.message}`);
-          }
-        }
+        await uploadProductImages(productId, form.images, visibleImageCount);
       }
 
       if (mergedIntoExisting) {
