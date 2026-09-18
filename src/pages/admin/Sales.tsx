@@ -12,6 +12,11 @@ import { Separator } from "@/components/ui/separator";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
+import {
+  formatAttributesLabel,
+  legacyAttributesFromVariant,
+  normalizeAttributes,
+} from "@/lib/productVariants";
 
 
 // ─── Taka Icon (forwardRef to satisfy Lucide's icon type) ────────────────────
@@ -76,6 +81,7 @@ interface Order {
 interface OrderItemVariant {
   size: string | null;
   color: string | null;
+  attributes?: Record<string, string> | null;
   sku: string;
   stock: number;
   products: { name: string } | null;
@@ -134,13 +140,25 @@ const PAYMENT_METHODS = ["cod", "card", "bank_transfer"];
 
 const STOCK_DEDUCT_STATUSES = new Set(["shipped", "delivered"]);
 
+function variantLabelFromOrderItem(variant: OrderItemVariant | null | undefined): string {
+  if (!variant) return "—";
+
+  const attributes =
+    variant.attributes && Object.keys(variant.attributes).length > 0
+      ? normalizeAttributes(variant.attributes)
+      : legacyAttributesFromVariant(variant.size, variant.color);
+
+  const label = formatAttributesLabel(attributes);
+  return label === "Default" ? "—" : label;
+}
+
 // ─── Stock preview helper ─────────────────────────────────────────────────────
 // Fetches current stock for each item in an order and returns preview rows.
 
 async function buildStockPreview(orderId: string): Promise<StockPreviewRow[]> {
   const { data: items, error } = await supabase
     .from("order_items")
-    .select("quantity, product_variant_id, product_variants(size, color, sku, stock, products(name))")
+    .select("quantity, product_variant_id, product_variants(size, color, attributes, sku, stock, products(name))")
     .eq("order_id", orderId);
 
   if (error || !items) return [];
@@ -148,8 +166,7 @@ async function buildStockPreview(orderId: string): Promise<StockPreviewRow[]> {
   return (items as unknown as OrderItem[]).map((item) => {
     const variant = item.product_variants;
     const productName = variant?.products?.name || "Unknown Product";
-    const variantParts = [variant?.size, variant?.color].filter(Boolean);
-    const variantLabel = variantParts.length > 0 ? variantParts.join(" / ") : "—";
+    const variantLabel = variantLabelFromOrderItem(variant);
     const sku = variant?.sku || "—";
     const currentStock = variant?.stock ?? 0;
     const deductQty = item.quantity;
@@ -384,7 +401,7 @@ export default function Sales() {
     setDetailStockPreview([]);
     const { data, error } = await supabase
       .from("order_items")
-      .select("*, product_variants(size, color, sku, stock, products(name))")
+      .select("*, product_variants(size, color, attributes, sku, stock, products(name))")
       .eq("order_id", order.id);
 
     if (error) {
@@ -911,7 +928,7 @@ export default function Sales() {
                       <div>
                         <p className="font-medium">{item.product_variants?.products?.name || "Unknown Product"}</p>
                         <p className="text-xs text-muted-foreground">
-                          {[item.product_variants?.size, item.product_variants?.color].filter(Boolean).join(" / ")}
+                          {variantLabelFromOrderItem(item.product_variants)}
                           {item.product_variants?.sku && (
                             <span className="ml-2 font-mono">SKU: {item.product_variants.sku}</span>
                           )}

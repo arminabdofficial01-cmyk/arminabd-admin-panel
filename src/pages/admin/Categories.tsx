@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { DataTable, Column } from "@/components/table/DataTable";
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
-import { TagInput, normalizeTagList } from "@/components/TagInput";
+import { TagInput } from "@/components/TagInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -15,29 +17,33 @@ import {
 } from "@/components/ui/dialog";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import {
+  CategoryVariantGroupInput,
+  fetchCategoryVariantConfig,
+  fetchVariantGroupCatalog,
+  saveCategoryVariantConfig,
+} from "@/lib/categoryVariantGroups";
+import { VariantGroupDefinition } from "@/lib/productVariants";
 
 interface CategoryRow {
   id: string;
   name: string;
   slug: string;
   description: string | null;
-  sizes: string[];
-  colors: string[];
+  variant_group_count: number;
   product_count: number;
 }
 
 interface CategoryForm {
   name: string;
   description: string;
-  sizes: string[];
-  colors: string[];
+  variantGroups: CategoryVariantGroupInput[];
 }
 
 const emptyCategoryForm: CategoryForm = {
   name: "",
   description: "",
-  sizes: [],
-  colors: [],
+  variantGroups: [],
 };
 
 function slugify(name: string): string {
@@ -82,8 +88,23 @@ async function findDuplicateCategoryName(
   );
 }
 
+function buildDefaultVariantInputs(
+  catalog: VariantGroupDefinition[],
+  optionsBySlug: Record<string, string[]>
+): CategoryVariantGroupInput[] {
+  return catalog.map((group) => ({
+    variant_group_id: group.id,
+    enabled: false,
+    is_required: false,
+    options: optionsBySlug[group.slug] ?? [],
+    sort_order: group.sort_order,
+  }));
+}
+
 export default function Categories() {
   const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [catalog, setCatalog] = useState<VariantGroupDefinition[]>([]);
+  const [catalogOptions, setCatalogOptions] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -97,7 +118,7 @@ export default function Categories() {
 
     const { data: categoryData, error: categoryError } = await supabase
       .from("categories")
-      .select("id, name, slug, description, sizes, colors")
+      .select("id, name, slug, description")
       .order("name");
 
     if (categoryError) {
@@ -106,13 +127,14 @@ export default function Categories() {
       return;
     }
 
-    const { data: productCounts, error: productError } = await supabase
-      .from("products")
-      .select("category_id")
-      .is("deleted_at", null);
+    const [{ data: productCounts, error: productError }, { data: groupCounts, error: groupError }] =
+      await Promise.all([
+        supabase.from("products").select("category_id").is("deleted_at", null),
+        supabase.from("category_variant_groups").select("category_id"),
+      ]);
 
-    if (productError) {
-      toast.error(`Failed to load product counts: ${productError.message}`);
+    if (productError || groupError) {
+      toast.error("Failed to load category stats");
       setLoading(false);
       return;
     }
@@ -123,11 +145,18 @@ export default function Categories() {
       countMap.set(row.category_id, (countMap.get(row.category_id) || 0) + 1);
     }
 
+    const groupCountMap = new Map<string, number>();
+    for (const row of groupCounts || []) {
+      groupCountMap.set(
+        row.category_id,
+        (groupCountMap.get(row.category_id) || 0) + 1
+      );
+    }
+
     setCategories(
       (categoryData || []).map((row) => ({
         ...row,
-        sizes: row.sizes || [],
-        colors: row.colors || [],
+        variant_group_count: groupCountMap.get(row.id) || 0,
         product_count: countMap.get(row.id) || 0,
       }))
     );
@@ -138,21 +167,65 @@ export default function Categories() {
     void loadCategories();
   }, [loadCategories]);
 
+  useEffect(() => {
+    fetchVariantGroupCatalog()
+      .then(({ groups, optionsBySlug }) => {
+        setCatalog(groups);
+        setCatalogOptions(optionsBySlug);
+      })
+      .catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : "Failed to load variant groups");
+      });
+  }, []);
+
   function openAdd() {
     setEditingId(null);
-    setForm(emptyCategoryForm);
+    setForm({
+      ...emptyCategoryForm,
+      variantGroups: buildDefaultVariantInputs(catalog, catalogOptions),
+    });
     setModalOpen(true);
   }
 
-  function openEdit(category: CategoryRow) {
+  async function openEdit(category: CategoryRow) {
     setEditingId(category.id);
-    setForm({
-      name: category.name,
-      description: category.description || "",
-      sizes: category.sizes || [],
-      colors: category.colors || [],
-    });
-    setModalOpen(true);
+
+    try {
+      const configs = await fetchCategoryVariantConfig(category.id);
+      const inputs = buildDefaultVariantInputs(catalog, catalogOptions).map((input) => {
+        const match = configs.find((config) => config.variant_group_id === input.variant_group_id);
+        if (!match) return input;
+
+        return {
+          ...input,
+          enabled: true,
+          is_required: match.is_required,
+          options: match.options.length > 0 ? match.options : input.options,
+          sort_order: match.sort_order,
+        };
+      });
+
+      setForm({
+        name: category.name,
+        description: category.description || "",
+        variantGroups: inputs,
+      });
+      setModalOpen(true);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to load category variants");
+    }
+  }
+
+  function updateVariantGroup(
+    variantGroupId: string,
+    patch: Partial<CategoryVariantGroupInput>
+  ) {
+    setForm((current) => ({
+      ...current,
+      variantGroups: current.variantGroups.map((group) =>
+        group.variant_group_id === variantGroupId ? { ...group, ...patch } : group
+      ),
+    }));
   }
 
   async function handleSave() {
@@ -172,9 +245,9 @@ export default function Categories() {
       const payload = {
         name: form.name.trim(),
         description: form.description.trim() || null,
-        sizes: normalizeTagList(form.sizes),
-        colors: normalizeTagList(form.colors),
       };
+
+      let categoryId = editingId;
 
       if (editingId) {
         const slug = await generateUniqueSlug(form.name, editingId);
@@ -184,16 +257,22 @@ export default function Categories() {
           .eq("id", editingId);
 
         if (error) throw new Error(`Category update failed: ${error.message}`);
-        toast.success("Category updated");
       } else {
         const slug = await generateUniqueSlug(form.name);
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from("categories")
-          .insert({ ...payload, slug });
+          .insert({ ...payload, slug })
+          .select("id")
+          .single();
 
         if (error) throw new Error(`Category insert failed: ${error.message}`);
-        toast.success("Category created");
+        categoryId = data?.id ?? null;
       }
+
+      if (!categoryId) throw new Error("Failed to get category ID");
+
+      await saveCategoryVariantConfig(categoryId, form.variantGroups);
+      toast.success(editingId ? "Category updated" : "Category created");
 
       setModalOpen(false);
       await loadCategories();
@@ -254,15 +333,9 @@ export default function Categories() {
       ),
     },
     {
-      key: "sizes",
-      label: "Sizes",
-      render: (row) => row.sizes.length,
-    },
-    {
-      key: "colors",
-      label: "Colors",
-      hideOnMobile: true,
-      render: (row) => row.colors.length,
+      key: "variant_groups",
+      label: "Variant Groups",
+      render: (row) => row.variant_group_count,
     },
     {
       key: "products",
@@ -274,7 +347,7 @@ export default function Categories() {
       label: "Actions",
       render: (row) => (
         <div className="flex gap-1">
-          <Button variant="ghost" size="sm" onClick={() => openEdit(row)}>
+          <Button variant="ghost" size="sm" onClick={() => void openEdit(row)}>
             <Pencil className="h-4 w-4" />
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setDeleteId(row.id)}>
@@ -285,16 +358,18 @@ export default function Categories() {
     },
   ];
 
+  const catalogById = new Map(catalog.map((group) => [group.id, group]));
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold">Categories</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Define default sizes and colors per category. Products inherit these options.
+            Configure which variant groups apply to each category — size, colour, form, fragrance, finish, pack size, and more.
           </p>
         </div>
-        <Button onClick={openAdd} className="w-full sm:w-auto">
+        <Button onClick={openAdd} className="w-full sm:w-auto" disabled={catalog.length === 0}>
           <Plus className="h-4 w-4 mr-2" />
           Add Category
         </Button>
@@ -308,7 +383,7 @@ export default function Categories() {
       />
 
       <Dialog open={modalOpen} onOpenChange={setModalOpen}>
-        <DialogContent className="w-[calc(100vw-2rem)] max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingId ? "Edit Category" : "Add Category"}</DialogTitle>
           </DialogHeader>
@@ -319,7 +394,7 @@ export default function Categories() {
               <Input
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. Panjabi"
+                placeholder="e.g. Panjabi / Clothing"
               />
             </div>
 
@@ -333,22 +408,83 @@ export default function Categories() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label>Default Sizes</Label>
-              <TagInput
-                values={form.sizes}
-                onChange={(v) => setForm((f) => ({ ...f, sizes: v }))}
-                placeholder="e.g. S, M, L, XL"
-              />
-            </div>
+            <div className="space-y-3">
+              <div>
+                <Label>Variant Groups</Label>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Enable groups for this category. Mark required groups and set default options products will inherit.
+                </p>
+              </div>
 
-            <div className="space-y-2">
-              <Label>Default Colors</Label>
-              <TagInput
-                values={form.colors}
-                onChange={(v) => setForm((f) => ({ ...f, colors: v }))}
-                placeholder="e.g. Red, Blue, White"
-              />
+              {form.variantGroups.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Loading variant groups...</p>
+              ) : (
+                <div className="space-y-3">
+                  {form.variantGroups
+                    .slice()
+                    .sort((a, b) => a.sort_order - b.sort_order)
+                    .map((groupInput) => {
+                      const group = catalogById.get(groupInput.variant_group_id);
+                      if (!group) return null;
+
+                      return (
+                        <div
+                          key={groupInput.variant_group_id}
+                          className="border rounded-lg p-4 space-y-3 bg-muted/20"
+                        >
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-medium">{group.name_en}</span>
+                                <span className="text-sm text-muted-foreground">({group.name_bn})</span>
+                                <Badge variant="outline" className="text-xs">{group.display_type}</Badge>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                              <div className="flex items-center gap-2">
+                                <Switch
+                                  checked={groupInput.enabled}
+                                  onCheckedChange={(enabled) =>
+                                    updateVariantGroup(groupInput.variant_group_id, {
+                                      enabled,
+                                      is_required: enabled ? groupInput.is_required : false,
+                                    })
+                                  }
+                                />
+                                <Label className="text-sm">Enabled</Label>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <Switch
+                                  checked={groupInput.is_required}
+                                  disabled={!groupInput.enabled}
+                                  onCheckedChange={(isRequired) =>
+                                    updateVariantGroup(groupInput.variant_group_id, {
+                                      is_required: isRequired,
+                                    })
+                                  }
+                                />
+                                <Label className="text-sm">Required</Label>
+                              </div>
+                            </div>
+                          </div>
+
+                          {groupInput.enabled && (
+                            <div className="space-y-2">
+                              <Label className="text-xs">Default options</Label>
+                              <TagInput
+                                values={groupInput.options}
+                                onChange={(options) =>
+                                  updateVariantGroup(groupInput.variant_group_id, { options })
+                                }
+                                placeholder={`Add ${group.name_en.toLowerCase()} options`}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">

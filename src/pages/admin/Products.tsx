@@ -3,8 +3,26 @@ import { supabase } from "@/integrations/supabase/client";
 import { StatCard } from "@/components/cards/StatCard";
 import { DataTable, Column } from "@/components/table/DataTable";
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
-import { TagInput, normalizeTagList } from "@/components/TagInput";
-import { Package, CheckCircle, AlertTriangle, XCircle, Plus, Pencil, Trash2, Eye } from "lucide-react";
+import { ProductVariantEditor } from "@/components/products/ProductVariantEditor";
+import { fetchCategoryVariantConfig } from "@/lib/categoryVariantGroups";
+import {
+  AUTO_SKU_PLACEHOLDER,
+  EMPTY_VARIANT_STATE,
+  ProductVariantState,
+  CategoryVariantGroupConfig,
+  VariantCombination,
+  buildVariantCombinations,
+  mergeDimensionValues,
+  findDuplicateAttributeKeys,
+  resolveVariantSkus,
+  buildVariantLookup,
+  resolveVariantId,
+  syncLegacySizeColor,
+  legacyAttributesFromVariant,
+  formatAttributesLabel,
+  normalizeAttributes,
+} from "@/lib/productVariants";
+import { Package, CheckCircle, AlertTriangle, XCircle, Plus, Pencil, Trash2, Eye, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -21,8 +39,6 @@ import { toast } from "sonner";
 interface Category {
   id: string;
   name: string;
-  sizes: string[];
-  colors: string[];
 }
 
 interface ProductImage {
@@ -38,6 +54,8 @@ interface ProductVariant {
   product_id: string;
   size: string | null;
   color: string | null;
+  attributes?: Record<string, string> | null;
+  expires_at?: string | null;
   sku: string;
   stock: number;
 }
@@ -98,24 +116,6 @@ function NumberInput({
   );
 }
 
-// ─── Variant types ────────────────────────────────────────────────────────────
-
-interface VariantCombination {
-  id?: string;
-  size: string;
-  color: string;
-  sku: string;
-  stock: string;
-  skuManuallyEdited: boolean;
-}
-
-interface VariantGroup {
-  id?: string;
-  sizes: string[];
-  colors: string[];
-  combinations: VariantCombination[];
-}
-
 interface ProductForm {
   name: string;
   short_description: string;
@@ -125,31 +125,19 @@ interface ProductForm {
   discounted_price: string;
   is_active: boolean;
   is_featured: boolean;
-  variantGroups: VariantGroup[];
+  variantState: ProductVariantState;
   images: File[];
   imagePreviews: string[];
 }
-
-const emptyVariantGroup: VariantGroup = {
-  sizes: [],
-  colors: [],
-  combinations: [],
-};
 
 const emptyForm: ProductForm = {
   name: "", short_description: "", description: "", category_id: "",
   base_price: "", discounted_price: "",
   is_active: true, is_featured: false,
-  variantGroups: [emptyVariantGroup], images: [], imagePreviews: [],
+  variantState: EMPTY_VARIANT_STATE, images: [], imagePreviews: [],
 };
 
-function unionTags(...lists: string[][]): string[] {
-  return normalizeTagList(lists.flat());
-}
-
-// ─── SKU & product identity helpers ───────────────────────────────────────────
-
-const AUTO_SKU_PLACEHOLDER = "Auto on save";
+// ─── Product identity helpers ─────────────────────────────────────────────────
 
 interface ExistingProductMatch {
   id: string;
@@ -161,69 +149,6 @@ function normalizeProductName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-function variantKey(size: string, color: string): string {
-  return `${(size || "").trim().toLowerCase()}::${(color || "").trim().toLowerCase()}`;
-}
-
-function generateVariantSku(displayId: string, size: string, color: string): string {
-  const id = displayId.trim().toUpperCase();
-  const hasSize = Boolean(size?.trim());
-  const hasColor = Boolean(color?.trim());
-
-  if (!hasSize && !hasColor) return `${id}-DEFAULT`;
-  if (hasSize && hasColor) {
-    return `${id}-${size.trim().toUpperCase()}-${color.trim().toUpperCase()}`;
-  }
-  if (hasSize) return `${id}-${size.trim().toUpperCase()}`;
-  return `${id}-DEFAULT-${color.trim().toUpperCase()}`;
-}
-
-interface VariantLookup {
-  byKey: Map<string, string>;
-  bySku: Map<string, string>;
-}
-
-function buildVariantLookup(
-  variants: { id: string; size: string | null; color: string | null; sku: string }[]
-): VariantLookup {
-  const byKey = new Map<string, string>();
-  const bySku = new Map<string, string>();
-
-  for (const variant of variants) {
-    byKey.set(variantKey(variant.size || "", variant.color || ""), variant.id);
-    bySku.set(variant.sku.trim().toUpperCase(), variant.id);
-  }
-
-  return { byKey, bySku };
-}
-
-function resolveVariantId(
-  combo: VariantCombination,
-  lookup: VariantLookup
-): string | null {
-  if (combo.id) return combo.id;
-
-  const keyMatch = lookup.byKey.get(variantKey(combo.size, combo.color));
-  if (keyMatch) return keyMatch;
-
-  const sku = combo.sku.trim().toUpperCase();
-  if (sku && sku !== AUTO_SKU_PLACEHOLDER.toUpperCase()) {
-    return lookup.bySku.get(sku) ?? null;
-  }
-
-  return null;
-}
-
-function findDuplicateVariantKeys(combos: VariantCombination[]): string | null {
-  const seen = new Set<string>();
-  for (const combo of combos) {
-    const key = variantKey(combo.size, combo.color);
-    if (seen.has(key)) return key;
-    seen.add(key);
-  }
-  return null;
-}
-
 function findDuplicateSkus(skus: string[]): string | null {
   const seen = new Set<string>();
   for (const sku of skus) {
@@ -233,25 +158,6 @@ function findDuplicateSkus(skus: string[]): string | null {
     seen.add(normalized);
   }
   return null;
-}
-
-function resolveVariantSkus(
-  combos: VariantCombination[],
-  displayId: string,
-  options: { isCreateFlow: boolean }
-): VariantCombination[] {
-  return combos.map((combo) => {
-    const autoSku = generateVariantSku(displayId, combo.size, combo.color);
-    const keepManualSku =
-      !options.isCreateFlow &&
-      combo.skuManuallyEdited &&
-      combo.sku !== AUTO_SKU_PLACEHOLDER;
-
-    return {
-      ...combo,
-      sku: keepManualSku ? combo.sku.trim().toUpperCase() : autoSku,
-    };
-  });
 }
 
 async function ensureProductDisplayId(productId: string): Promise<string> {
@@ -361,6 +267,7 @@ function formatSaveError(err: unknown): string {
 
   if (
     message.includes("product_variants_sku_active_unique") ||
+    message.includes("product_variants_product_attributes_active_unique") ||
     message.includes("product_variants_product_size_color_active_unique") ||
     message.includes("duplicate key value violates unique constraint")
   ) {
@@ -368,10 +275,28 @@ function formatSaveError(err: unknown): string {
     if (skuMatch?.[1]) {
       return `SKU "${skuMatch[1]}" is already used by another product. Please change it.`;
     }
+    if (message.includes("product_variants_product_attributes_active_unique")) {
+      return "A variant with this attribute combination already exists for this product.";
+    }
     if (message.includes("product_variants_product_size_color_active_unique")) {
       return "A variant with this size and color already exists for this product.";
     }
     return "This SKU is already used by another product. Please use a unique SKU for each variant.";
+  }
+
+  if (message.includes("Bucket not found")) {
+    return "Image storage is not configured. Run the Supabase storage migration on your project.";
+  }
+
+  if (
+    message.includes("row-level security") ||
+    message.includes("new row violates row-level security policy")
+  ) {
+    return "Image upload denied. Ensure your account has admin permissions in Supabase.";
+  }
+
+  if (message.includes("Image upload failed") || message.includes("Failed to save image record")) {
+    return message;
   }
 
   return message;
@@ -381,60 +306,6 @@ async function rollbackCreatedProduct(productId: string) {
   await supabase.from("product_variants").delete().eq("product_id", productId);
   await supabase.from("product_images").delete().eq("product_id", productId);
   await supabase.from("products").delete().eq("id", productId);
-}
-
-function buildCombinations(
-  group: VariantGroup,
-  displayId: string | null,
-  existingCombos: VariantCombination[]
-): VariantCombination[] {
-  const sizes = group.sizes.length > 0 ? group.sizes : [""];
-  const colors = group.colors.length > 0 ? group.colors : [""];
-  const combos: VariantCombination[] = [];
-
-  sizes.forEach((size) => {
-    colors.forEach((color) => {
-      const existing = existingCombos.find((c) => c.size === size && c.color === color);
-      const autoSku = displayId
-        ? generateVariantSku(displayId, size, color)
-        : AUTO_SKU_PLACEHOLDER;
-
-      combos.push({
-        id: existing?.id,
-        size,
-        color,
-        sku: existing?.skuManuallyEdited ? existing.sku : autoSku,
-        stock: existing?.stock ?? "0",
-        skuManuallyEdited: existing?.skuManuallyEdited ?? false,
-      });
-    });
-  });
-
-  return combos;
-}
-
-function buildVariantGroupFromCategory(
-  category: Category | undefined,
-  existingGroup: VariantGroup | undefined,
-  displayId: string | null
-): VariantGroup {
-  const existingCombos = existingGroup?.combinations ?? [];
-  const sizes = unionTags(
-    category?.sizes ?? [],
-    existingGroup?.sizes ?? [],
-    existingCombos.map((combo) => combo.size)
-  );
-  const colors = unionTags(
-    category?.colors ?? [],
-    existingGroup?.colors ?? [],
-    existingCombos.map((combo) => combo.color)
-  );
-
-  const group: VariantGroup = { sizes, colors, combinations: [] };
-  return {
-    ...group,
-    combinations: buildCombinations(group, displayId, existingCombos),
-  };
 }
 
 // ─── Helper: extract storage path from public URL ────────────────────────────
@@ -450,6 +321,85 @@ function extractStoragePath(imageUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif", "heic", "heif"]);
+
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith("image/")) return true;
+  const ext = file.name.split(".").pop()?.toLowerCase();
+  return ext ? IMAGE_EXTENSIONS.has(ext) : false;
+}
+
+function getImageContentType(file: File): string {
+  if (file.type.startsWith("image/")) return file.type;
+
+  const ext = file.name.split(".").pop()?.toLowerCase();
+  const mimeByExt: Record<string, string> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+    heic: "image/heic",
+    heif: "image/heif",
+  };
+
+  return (ext && mimeByExt[ext]) || "image/jpeg";
+}
+
+function buildImageStoragePath(productId: string, file: File): string {
+  const ext = file.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const safeExt = IMAGE_EXTENSIONS.has(ext) ? ext : "jpg";
+  return `${productId}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}.${safeExt}`;
+}
+
+function combosFromDbVariants(variants: ProductVariant[]): VariantCombination[] {
+  return variants.map((variant) => {
+    const attributes =
+      variant.attributes && Object.keys(variant.attributes).length > 0
+        ? normalizeAttributes(variant.attributes)
+        : legacyAttributesFromVariant(variant.size, variant.color);
+
+    return {
+      id: variant.id,
+      attributes,
+      sku: variant.sku,
+      stock: String(variant.stock),
+      expires_at: variant.expires_at || "",
+      skuManuallyEdited: true,
+    };
+  });
+}
+
+function buildVariantState(
+  configs: CategoryVariantGroupConfig[],
+  existingCombos: VariantCombination[],
+  displayId: string | null,
+  existingDimensionValues?: Record<string, string[]>
+): ProductVariantState {
+  const dimensionValues = mergeDimensionValues(
+    configs,
+    existingDimensionValues,
+    Object.fromEntries(
+      configs.map((config) => [
+        config.slug,
+        existingCombos.flatMap((combo) =>
+          combo.attributes[config.slug] ? [combo.attributes[config.slug]] : []
+        ),
+      ])
+    )
+  );
+
+  return {
+    dimensionValues,
+    combinations: buildVariantCombinations(
+      configs,
+      dimensionValues,
+      displayId,
+      existingCombos
+    ),
+  };
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -481,6 +431,7 @@ export default function Products() {
   const [searchDebounce, setSearchDebounce] = useState("");
   const [productDisplayId, setProductDisplayId] = useState<string | null>(null);
   const [mergePreview, setMergePreview] = useState<ExistingProductMatch | null>(null);
+  const [categoryVariantConfigs, setCategoryVariantConfigs] = useState<CategoryVariantGroupConfig[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   function getEffectiveDisplayId(): string | null {
@@ -490,11 +441,24 @@ export default function Products() {
   function rebuildVariantSkus(displayId: string | null) {
     setForm((f) => ({
       ...f,
-      variantGroups: f.variantGroups.map((group) => ({
-        ...group,
-        combinations: buildCombinations(group, displayId, group.combinations),
-      })),
+      variantState: buildVariantState(
+        categoryVariantConfigs,
+        f.variantState.combinations,
+        displayId,
+        f.variantState.dimensionValues
+      ),
     }));
+  }
+
+  async function loadCategoryVariantConfigs(categoryId: string) {
+    if (!categoryId) {
+      setCategoryVariantConfigs([]);
+      return [];
+    }
+
+    const configs = await fetchCategoryVariantConfig(categoryId);
+    setCategoryVariantConfigs(configs);
+    return configs;
   }
 
   async function checkForExistingProduct(name: string, categoryId: string) {
@@ -513,34 +477,38 @@ export default function Products() {
 
         const { data: variants, error: variantsError } = await supabase
           .from("product_variants")
-          .select("id, size, color, stock, sku")
+          .select("id, size, color, attributes, stock, sku, expires_at")
           .eq("product_id", existing.id)
           .is("deleted_at", null);
 
         if (variantsError) throw new Error(`Variant lookup failed: ${variantsError.message}`);
 
-        setForm((f) => ({
-          ...f,
-          variantGroups: f.variantGroups.map((group) => ({
-            ...group,
-            combinations: group.combinations.map((combo) => {
-              const match = (variants || []).find(
-                (variant) =>
-                  variantKey(variant.size || "", variant.color || "") ===
-                  variantKey(combo.size, combo.color)
-              );
+        const dbCombos = combosFromDbVariants((variants as ProductVariant[]) || []);
+        const lookup = buildVariantLookup((variants as ProductVariant[]) || []);
+
+        setForm((f) => {
+          const variantState = buildVariantState(
+            categoryVariantConfigs,
+            f.variantState.combinations.map((combo) => {
+              const matchId = resolveVariantId(combo, lookup);
+              const match = dbCombos.find((row) => row.id === matchId);
               return {
                 ...combo,
                 id: match?.id,
-                stock: match ? String(match.stock) : combo.stock,
+                stock: match ? match.stock : combo.stock,
+                expires_at: match?.expires_at ?? combo.expires_at,
                 sku: displayId
-                  ? generateVariantSku(displayId, combo.size, combo.color)
+                  ? resolveVariantSkus([combo], displayId, { isCreateFlow: true })[0].sku
                   : AUTO_SKU_PLACEHOLDER,
                 skuManuallyEdited: false,
               };
             }),
-          })),
-        }));
+            displayId,
+            f.variantState.dimensionValues
+          );
+
+          return { ...f, variantState };
+        });
       } else {
         setMergePreview(null);
         setProductDisplayId(null);
@@ -645,36 +613,36 @@ export default function Products() {
   useEffect(() => {
     supabase
       .from("categories")
-      .select("id, name, sizes, colors")
+      .select("id, name")
       .order("name")
       .then(({ data, error }) => {
         if (error) {
           toast.error(`Failed to load categories: ${error.message}`);
           return;
         }
-        setCategories(
-          (data || []).map((row) => ({
-            id: row.id,
-            name: row.name,
-            sizes: row.sizes || [],
-            colors: row.colors || [],
-          }))
-        );
+        setCategories((data as Category[]) || []);
       });
   }, []);
 
-  function handleCategoryChange(categoryId: string) {
-    const category = categories.find((item) => item.id === categoryId);
+  async function handleCategoryChange(categoryId: string) {
     const displayId = getEffectiveDisplayId();
 
-    setForm((f) => ({
-      ...f,
-      category_id: categoryId,
-      variantGroups: [
-        buildVariantGroupFromCategory(category, f.variantGroups[0], displayId),
-      ],
-    }));
-    void checkForExistingProduct(form.name, categoryId);
+    try {
+      const configs = await loadCategoryVariantConfigs(categoryId);
+      setForm((f) => ({
+        ...f,
+        category_id: categoryId,
+        variantState: buildVariantState(
+          configs,
+          f.variantState.combinations,
+          displayId,
+          f.variantState.dimensionValues
+        ),
+      }));
+      void checkForExistingProduct(form.name, categoryId);
+    } catch (err: unknown) {
+      toast.error(formatSaveError(err));
+    }
   }
 
   function resetImageState() {
@@ -686,10 +654,8 @@ export default function Products() {
 
   function openAdd() {
     setEditingId(null);
-    setForm({
-      ...emptyForm,
-      variantGroups: [{ sizes: [], colors: [], combinations: [] }],
-    });
+    setForm(emptyForm);
+    setCategoryVariantConfigs([]);
     setProductDisplayId(null);
     setMergePreview(null);
     resetImageState();
@@ -726,34 +692,11 @@ export default function Products() {
       setMergePreview(null);
       resetImageState();
       setExistingImages((images as ProductImage[]) || []);
-      const combinations: VariantCombination[] = ((variants as ProductVariant[]) || []).map((v) => ({
-        id: v.id,
-        size: v.size || "",
-        color: v.color || "",
-        sku: v.sku,
-        stock: String(v.stock),
-        skuManuallyEdited: true,
-      }));
-      const category = categories.find((item) => item.id === product.category_id);
-      const sizes = unionTags(
-        category?.sizes ?? [],
-        combinations.map((c) => c.size)
-      );
-      const colors = unionTags(
-        category?.colors ?? [],
-        combinations.map((c) => c.color)
-      );
-      const variantGroup: VariantGroup = {
-        sizes,
-        colors,
-        combinations: combinations.length > 0
-          ? buildCombinations(
-              { sizes, colors, combinations: [] },
-              product.display_id || null,
-              combinations
-            )
-          : [],
-      };
+      const combinations = combosFromDbVariants((variants as ProductVariant[]) || []);
+      const configs = product.category_id
+        ? await fetchCategoryVariantConfig(product.category_id)
+        : [];
+      setCategoryVariantConfigs(configs);
       setForm({
         name: product.name,
         short_description: product.short_description || "",
@@ -763,7 +706,11 @@ export default function Products() {
         discounted_price: product.discounted_price ? String(product.discounted_price) : "",
         is_active: product.is_active,
         is_featured: product.is_featured,
-        variantGroups: [variantGroup],
+        variantState: buildVariantState(
+          configs,
+          combinations,
+          product.display_id || null
+        ),
         images: [],
         imagePreviews: [],
       });
@@ -819,53 +766,13 @@ export default function Products() {
   const visibleExistingImages = existingImages.filter((img) => !removedImageIds.includes(img.id));
   const totalImageCount = visibleExistingImages.length + form.images.length;
 
-  function updateGroupSizesOrColors(
-    groupIdx: number,
-    field: "sizes" | "colors",
-    values: string[]
-  ) {
-    const displayId = getEffectiveDisplayId();
-    setForm((f) => {
-      const groups = [...f.variantGroups];
-      const group = { ...groups[groupIdx], [field]: values };
-      group.combinations = buildCombinations(group, displayId, group.combinations);
-      groups[groupIdx] = group;
-      return { ...f, variantGroups: groups };
-    });
-  }
-
   function handleNameChange(name: string) {
-    const displayId = getEffectiveDisplayId();
-    setForm((f) => {
-      const variantGroups = f.variantGroups.map((group) => ({
-        ...group,
-        combinations: buildCombinations(group, displayId, group.combinations),
-      }));
-      return { ...f, name, variantGroups };
-    });
+    setForm((f) => ({ ...f, name }));
   }
 
-  function updateCombination(
-    groupIdx: number,
-    comboIdx: number,
-    field: keyof VariantCombination,
-    value: string
-  ) {
-    setForm((f) => {
-      const groups = [...f.variantGroups];
-      const combos = [...groups[groupIdx].combinations];
-      combos[comboIdx] = {
-        ...combos[comboIdx],
-        [field]: value,
-        ...(field === "sku" ? { skuManuallyEdited: true } : {}),
-      };
-      groups[groupIdx] = { ...groups[groupIdx], combinations: combos };
-      return { ...f, variantGroups: groups };
-    });
+  function handleVariantStateChange(variantState: ProductVariantState) {
+    setForm((f) => ({ ...f, variantState }));
   }
-
-  const selectedCategory = categories.find((item) => item.id === form.category_id);
-  const variantGroup = form.variantGroups[0] ?? emptyVariantGroup;
 
   // ─── Save ───────────────────────────────────────────────────────────────────
 
@@ -879,16 +786,26 @@ export default function Products() {
       return;
     }
 
-    const allCombos = form.variantGroups.flatMap((group) => group.combinations);
-    const duplicateVariantKey = findDuplicateVariantKeys(allCombos);
+    const allCombos = form.variantState.combinations;
+    const duplicateVariantKey = findDuplicateAttributeKeys(allCombos);
     if (duplicateVariantKey) {
-      toast.error("Duplicate size/color combination in form. Each variant must be unique.");
+      toast.error("Duplicate variant combination in form. Each variant must be unique.");
       return;
+    }
+
+    for (const config of categoryVariantConfigs) {
+      if (!config.is_required) continue;
+      const values = form.variantState.dimensionValues[config.slug] ?? config.options;
+      if (values.length === 0) {
+        toast.error(`${config.name_en} is required for this category. Add at least one option.`);
+        return;
+      }
     }
 
     setSaving(true);
     const isCreateFlow = !editingId;
     let createdProductId: string | null = null;
+    let shouldRollbackProduct = false;
     let mergedIntoExisting = false;
 
     try {
@@ -934,6 +851,7 @@ export default function Products() {
           if (error) throw new Error(`Product insert error: ${error.message}`);
           productId = data?.id ?? null;
           createdProductId = productId;
+          shouldRollbackProduct = true;
         }
       }
 
@@ -965,7 +883,7 @@ export default function Products() {
 
       const { data: ownVariants, error: ownVariantsError } = await supabase
         .from("product_variants")
-        .select("id, size, color, sku")
+        .select("id, size, color, attributes, sku")
         .eq("product_id", productId)
         .is("deleted_at", null);
 
@@ -988,12 +906,15 @@ export default function Products() {
       const keptVariantIds: string[] = [];
 
       for (const combo of resolvedCombos) {
+        const legacy = syncLegacySizeColor(combo.attributes);
         const variantPayload = {
           product_id: productId,
-          size: combo.size || null,
-          color: combo.color || null,
+          attributes: combo.attributes,
+          size: legacy.size,
+          color: legacy.color,
           sku: combo.sku,
           stock: parseInt(combo.stock, 10) || 0,
+          expires_at: combo.expires_at || null,
         };
 
         const variantId = resolveVariantId(combo, variantLookup);
@@ -1031,6 +952,8 @@ export default function Products() {
           if (data?.id) keptVariantIds.push(data.id);
         }
       }
+
+      shouldRollbackProduct = false;
 
       if (editingId) {
         const now = new Date().toISOString();
@@ -1079,52 +1002,50 @@ export default function Products() {
         }
       }
 
-      const { count: existingImageCount, error: imageCountError } = await supabase
-        .from("product_images")
-        .select("id", { count: "exact", head: true })
-        .eq("product_id", productId);
-
-      if (imageCountError) {
-        throw new Error(`Failed to count images: ${imageCountError.message}`);
-      }
+      const visibleImageCount = visibleExistingImages.length;
 
       if (form.images.length > 0) {
+        if (visibleImageCount + form.images.length > 3) {
+          throw new Error("Maximum 3 images allowed per product.");
+        }
+
         for (let i = 0; i < form.images.length; i++) {
           const file = form.images[i];
           if (file.size > 5 * 1024 * 1024) {
-            toast.error(`Image ${file.name} exceeds 5MB limit`);
-            continue;
+            throw new Error(`Image ${file.name} exceeds 5MB limit.`);
           }
-          if (!file.type.startsWith("image/")) {
-            toast.error(`File ${file.name} is not an image`);
-            continue;
+          if (!isImageFile(file)) {
+            throw new Error(`File ${file.name} is not a supported image type.`);
           }
 
-          const sanitizedName = file.name.replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "");
-          const path = `${productId}/${Date.now()}_${sanitizedName}`;
+          const path = buildImageStoragePath(productId, file);
+          const contentType = getImageContentType(file);
 
           const { error: uploadError } = await supabase.storage
             .from("products")
-            .upload(path, file, { cacheControl: "3600", upsert: false });
+            .upload(path, file, {
+              cacheControl: "3600",
+              upsert: false,
+              contentType,
+            });
 
           if (uploadError) {
             throw new Error(`Image upload failed: ${uploadError.message}`);
           }
 
-          const { data: urlData } = supabase.storage
-            .from("products")
-            .getPublicUrl(path);
+          const { data: urlData } = supabase.storage.from("products").getPublicUrl(path);
 
-          const isPrimary = i === 0 && (existingImageCount === 0 || existingImageCount === null);
+          const isPrimary = visibleImageCount === 0 && i === 0;
 
           const { error: dbError } = await supabase.from("product_images").insert({
             product_id: productId,
             image_url: urlData.publicUrl,
             is_primary: isPrimary,
-            sort_order: (existingImageCount || 0) + i,
+            sort_order: visibleImageCount + i,
           });
 
           if (dbError) {
+            await supabase.storage.from("products").remove([path]);
             throw new Error(`Failed to save image record: ${dbError.message}`);
           }
         }
@@ -1141,7 +1062,7 @@ export default function Products() {
       resetImageState();
       loadProducts();
     } catch (err: unknown) {
-      if (isCreateFlow && createdProductId) {
+      if (isCreateFlow && createdProductId && shouldRollbackProduct) {
         await rollbackCreatedProduct(createdProductId);
       }
       toast.error(formatSaveError(err));
@@ -1436,17 +1357,14 @@ export default function Products() {
 
             {form.category_id && (
               <p className="text-xs text-muted-foreground">
-                Default options from category. You can add extra sizes/colors below.
+                Variant groups load from the category. You can add extra options per product below.
               </p>
             )}
-            {form.category_id &&
-              selectedCategory &&
-              selectedCategory.sizes.length === 0 &&
-              selectedCategory.colors.length === 0 && (
-                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                  No variant options set for this category — add them here or in Categories.
-                </p>
-              )}
+            {form.category_id && categoryVariantConfigs.length === 0 && (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                No variant groups enabled for this category — configure them in Categories.
+              </p>
+            )}
 
             {/* Price preview */}
             {form.discounted_price &&
@@ -1559,118 +1477,29 @@ export default function Products() {
               <div>
                 <Label>Variants</Label>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Select a category for defaults, or add sizes and colors manually. Each combination gets its own SKU and stock.
+                  Configure size, colour, form, fragrance, finish, pack size, and more based on category. Each combination gets its own SKU, stock, and optional expiry date.
                 </p>
               </div>
 
-              {!form.category_id && (
+              {!form.category_id ? (
                 <p className="text-sm text-muted-foreground text-center py-4 border rounded-md border-dashed">
-                  Select a category to load default variant options.
+                  Select a category to load variant groups.
                 </p>
+              ) : (
+                <div className="border rounded-lg p-4 bg-muted/20">
+                  <ProductVariantEditor
+                    configs={categoryVariantConfigs}
+                    variantState={form.variantState}
+                    displayId={getEffectiveDisplayId()}
+                    onChange={handleVariantStateChange}
+                  />
+                </div>
               )}
 
-              <div className="border rounded-lg p-4 space-y-4 bg-muted/20">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <Label className="text-xs mb-1 block">
-                      Sizes{" "}
-                      <span className="text-muted-foreground">(press Enter or comma)</span>
-                    </Label>
-                    <TagInput
-                      values={variantGroup.sizes}
-                      onChange={(v) => updateGroupSizesOrColors(0, "sizes", v)}
-                      placeholder="e.g. S, M, L, XL"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs mb-1 block">
-                      Colors{" "}
-                      <span className="text-muted-foreground">(press Enter or comma)</span>
-                    </Label>
-                    <TagInput
-                      values={variantGroup.colors}
-                      onChange={(v) => updateGroupSizesOrColors(0, "colors", v)}
-                      placeholder="e.g. Red, Blue, White"
-                    />
-                  </div>
-                </div>
-
-                {variantGroup.combinations.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="hidden sm:grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
-                      <span>Size</span>
-                      <span>Color</span>
-                      <span>SKU <span className="font-normal">(auto-generated, editable)</span></span>
-                      <span>Stock</span>
-                    </div>
-                    {variantGroup.combinations.map((combo, ci) => (
-                      <div
-                        key={`${combo.size}-${combo.color}`}
-                        className="grid grid-cols-1 sm:grid-cols-4 gap-2 items-center bg-background rounded-md p-3 sm:p-2 border"
-                      >
-                        <div className="flex items-center justify-between sm:block">
-                          <span className="text-xs text-muted-foreground sm:hidden">Size</span>
-                          <span className="text-sm font-medium">
-                            {combo.size || <span className="text-muted-foreground italic">—</span>}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between sm:block">
-                          <span className="text-xs text-muted-foreground sm:hidden">Color</span>
-                          <span className="text-sm font-medium">
-                            {combo.color || <span className="text-muted-foreground italic">—</span>}
-                          </span>
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-xs text-muted-foreground sm:hidden">SKU</span>
-                          <Input
-                            value={combo.sku}
-                            readOnly={
-                              !combo.skuManuallyEdited &&
-                              combo.sku === AUTO_SKU_PLACEHOLDER
-                            }
-                            onChange={(e) =>
-                              updateCombination(0, ci, "sku", e.target.value.toUpperCase())
-                            }
-                            className="h-8 text-xs font-mono"
-                            placeholder="SKU"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-xs text-muted-foreground sm:hidden">Stock</span>
-                          <NumberInput
-                            value={combo.stock}
-                            onChange={(v) => updateCombination(0, ci, "stock", v)}
-                            placeholder="0"
-                            className="h-8 text-sm"
-                          />
-                        </div>
-                      </div>
-                    ))}
-                    <p className="text-xs text-muted-foreground pt-1">
-                      Total stock:{" "}
-                      <span className="font-semibold">
-                        {variantGroup.combinations.reduce(
-                          (sum, combo) => sum + (parseInt(combo.stock, 10) || 0),
-                          0
-                        )}
-                      </span>
-                    </p>
-                  </div>
-                )}
-
-                {variantGroup.combinations.length === 0 &&
-                  (variantGroup.sizes.length > 0 || variantGroup.colors.length > 0) && (
-                    <p className="text-xs text-muted-foreground text-center py-2">
-                      Add both sizes and colors to see combinations, or add just one to create
-                      single-dimension variants.
-                    </p>
-                  )}
-              </div>
-
-              {variantGroup.combinations.length > 0 && (
+              {form.variantState.combinations.length > 0 && (
                 <div className="flex justify-end text-sm font-semibold">
                   Total Stock:{" "}
-                  {variantGroup.combinations.reduce(
+                  {form.variantState.combinations.reduce(
                     (sum, combo) => sum + (parseInt(combo.stock, 10) || 0),
                     0
                   )}
@@ -1790,18 +1619,29 @@ export default function Products() {
                 <h4 className="font-semibold mb-2">Variants ({viewVariants.length})</h4>
                 <div className="space-y-1">
                   <div className="grid grid-cols-4 gap-2 text-xs font-semibold text-muted-foreground px-1">
-                    <span>Size</span>
-                    <span>Color</span>
+                    <span className="col-span-2">Variant</span>
                     <span>SKU</span>
                     <span className="text-right">Stock</span>
                   </div>
-                  {viewVariants.map((v) => (
+                  {viewVariants.map((v) => {
+                    const attributes =
+                      v.attributes && Object.keys(v.attributes).length > 0
+                        ? normalizeAttributes(v.attributes)
+                        : legacyAttributesFromVariant(v.size, v.color);
+
+                    return (
                     <div
                       key={v.id}
                       className="grid grid-cols-4 gap-2 items-center py-2 border-b text-sm"
                     >
-                      <span>{v.size || "—"}</span>
-                      <span>{v.color || "—"}</span>
+                      <span className="col-span-2">
+                        {formatAttributesLabel(attributes)}
+                        {v.expires_at && (
+                          <span className="block text-xs text-muted-foreground">
+                            Exp: {v.expires_at}
+                          </span>
+                        )}
+                      </span>
                       <span className="font-mono text-xs text-muted-foreground">{v.sku}</span>
                       <span
                         className={`text-right font-semibold text-xs ${
@@ -1815,7 +1655,8 @@ export default function Products() {
                         {v.stock}
                       </span>
                     </div>
-                  ))}
+                    );
+                  })}
                   <div className="flex justify-between pt-2 font-semibold text-sm">
                     <span>Total Stock</span>
                     <span>{viewVariants.reduce((s, v) => s + v.stock, 0)}</span>

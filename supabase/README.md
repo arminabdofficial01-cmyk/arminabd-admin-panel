@@ -17,7 +17,9 @@ Or apply the SQL files in `supabase/migrations/` manually via the Supabase SQL e
 - `20260229130000_product_variants_sku_active_unique.sql` — unique active SKUs
 - `20260229140000_product_variant_upsert_constraints.sql` — one variant per size+color per product
 - `20260229150000_backfill_product_display_ids.sql` — backfill display_id on existing products
-- `20260229160000_category_variant_templates.sql` — per-category default sizes/colors arrays
+- `20260229160000_category_variant_templates.sql` — per-category default sizes/colors arrays (legacy; migrated by next migration)
+- `20260229170000_ensure_products_storage_bucket.sql` — products storage bucket + admin upload policies
+- `20260229180000_dynamic_variant_groups.sql` — dynamic variant groups (size, colour, form, fragrance, finish, pack size), category mapping, `product_variants.attributes`, optional `expires_at`
 
 ## Promote an admin user
 

@@ -14,6 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
+      category_variant_groups: {
+        Row: {
+          category_id: string
+          is_required: boolean
+          options: string[]
+          sort_order: number
+          variant_group_id: string
+        }
+        Insert: {
+          category_id: string
+          is_required?: boolean
+          options?: string[]
+          sort_order?: number
+          variant_group_id: string
+        }
+        Update: {
+          category_id?: string
+          is_required?: boolean
+          options?: string[]
+          sort_order?: number
+          variant_group_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "category_variant_groups_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "category_variant_groups_variant_group_id_fkey"
+            columns: ["variant_group_id"]
+            isOneToOne: false
+            referencedRelation: "variant_groups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       categories: {
         Row: {
           colors: string[]
@@ -217,9 +256,11 @@ export type Database = {
       }
       product_variants: {
         Row: {
+          attributes: Json
           color: string | null
           created_at: string
           deleted_at: string | null
+          expires_at: string | null
           id: string
           price_override: number | null
           product_id: string
@@ -228,9 +269,11 @@ export type Database = {
           stock: number
         }
         Insert: {
+          attributes?: Json
           color?: string | null
           created_at?: string
           deleted_at?: string | null
+          expires_at?: string | null
           id?: string
           price_override?: number | null
           product_id: string
@@ -239,9 +282,11 @@ export type Database = {
           stock?: number
         }
         Update: {
+          attributes?: Json
           color?: string | null
           created_at?: string
           deleted_at?: string | null
+          expires_at?: string | null
           id?: string
           price_override?: number | null
           product_id?: string
@@ -317,6 +362,65 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      variant_group_options: {
+        Row: {
+          id: string
+          sort_order: number
+          value: string
+          variant_group_id: string
+        }
+        Insert: {
+          id?: string
+          sort_order?: number
+          value: string
+          variant_group_id: string
+        }
+        Update: {
+          id?: string
+          sort_order?: number
+          value?: string
+          variant_group_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "variant_group_options_variant_group_id_fkey"
+            columns: ["variant_group_id"]
+            isOneToOne: false
+            referencedRelation: "variant_groups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      variant_groups: {
+        Row: {
+          created_at: string
+          display_type: string
+          id: string
+          name_bn: string
+          name_en: string
+          slug: string
+          sort_order: number
+        }
+        Insert: {
+          created_at?: string
+          display_type?: string
+          id?: string
+          name_bn: string
+          name_en: string
+          slug: string
+          sort_order?: number
+        }
+        Update: {
+          created_at?: string
+          display_type?: string
+          id?: string
+          name_bn?: string
+          name_en?: string
+          slug?: string
+          sort_order?: number
+        }
+        Relationships: []
       }
       profiles: {
         Row: {
