@@ -30,3 +30,9 @@ After the first admin account signs up, run `supabase/seed_admin.sql` in the SQL
 1. Sign in as a customer account and confirm admin routes redirect to `/unauthorized`.
 2. Sign in as an admin and confirm products, orders, and settings load.
 3. Run `select public.is_admin();` while authenticated as admin — it should return `true`.
+
+## Keep-alive cron (free tier)
+
+Supabase free-tier projects pause after ~90 days without API activity. A GitHub Actions job fetches recent orders every 2 hours to prevent this.
+
+See **[`cron/README.md`](../cron/README.md)** for setup (GitHub Secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) and manual testing.
